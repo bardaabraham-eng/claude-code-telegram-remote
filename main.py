@@ -4,7 +4,9 @@ Main entry point: Telegram bot that connects to the Claude agent.
 
 import asyncio
 import io
+import json
 import logging
+import os
 import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -39,6 +41,38 @@ scheduler = TaskScheduler()
 
 # Pending prompts waiting for project selection
 pending_prompts: dict[int, dict] = {}
+
+# CLI history file — remember directories used in CLI mode
+CLI_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cli_history.json")
+
+
+def _load_cli_history() -> list[dict]:
+    """Load CLI directory history."""
+    try:
+        if os.path.exists(CLI_HISTORY_FILE):
+            with open(CLI_HISTORY_FILE, "r", encoding="utf-8") as f:
+                import json
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def _save_cli_history(entry: dict):
+    """Add a directory to CLI history (most recent first, max 10)."""
+    import json
+    history = _load_cli_history()
+    # Remove duplicates
+    history = [h for h in history if h["path"] != entry["path"]]
+    # Add to front
+    history.insert(0, entry)
+    # Keep max 10
+    history = history[:10]
+    try:
+        with open(CLI_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # Message batching: accumulate rapid messages into one prompt
 # Maps chat_id -> {"parts": [str, ...], "task": asyncio.Task, "update": Update}
@@ -116,73 +150,74 @@ async def send_file_if_needed(update: Update, text: str):
 async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
     """
     Detect VS Code workspaces and ask the user to pick one.
-    Returns True if selection was shown, False if no workspaces found.
+    Always includes CLI option. Returns True if selection was shown.
     """
     workspaces = await asyncio.to_thread(get_vscode_workspaces)
 
-    if not workspaces:
-        # No VS Code windows — offer CLI mode
-        prompt_data["mode"] = "cli"
-        # Try to find project directories for CLI fallback
-        from workspace_detector import find_project_dirs
-        project_dirs = await asyncio.to_thread(find_project_dirs)
+    # Build CLI project list (disk scan + history)
+    from workspace_detector import find_project_dirs
+    cli_dirs = await asyncio.to_thread(find_project_dirs)
+    cli_history = _load_cli_history()
 
-        if not project_dirs:
-            await update.message.reply_text(
-                "❌ לא נמצאו חלונות VS Code פתוחים ולא נמצאו תיקיות פרויקט.\n\n"
-                "פתח VS Code או צור תיקיית פרויקט."
-            )
-            return True
+    # Merge history into cli_dirs (add any from history not already found)
+    cli_paths = {d["path"] for d in cli_dirs}
+    for h in cli_history:
+        if h["path"] not in cli_paths and os.path.isdir(h["path"]):
+            cli_dirs.insert(0, h)
+            cli_paths.add(h["path"])
 
-        msg = await update.message.reply_text("⏳ VS Code לא פתוח. עובר למצב CLI...")
-
-        buttons = []
-        for i, pd in enumerate(project_dirs):
-            buttons.append(
-                [InlineKeyboardButton(
-                    f"💻 {pd['name']}  ({pd['path']})",
-                    callback_data=f"project:{i}",
-                )]
-            )
-
-        keyboard = InlineKeyboardMarkup(buttons)
-        prompt_data["workspaces"] = project_dirs
-        sent = await msg.edit_text(
-            "💻 *מצב CLI — באיזה פרויקט?*\n\n"
-            "VS Code לא פתוח. Claude Code ירוץ ב-CLI.",
-            reply_markup=keyboard,
-            parse_mode="Markdown",
+    if not workspaces and not cli_dirs:
+        await update.message.reply_text(
+            "❌ לא נמצאו חלונות VS Code ולא נמצאו תיקיות פרויקט.\n\n"
+            "פתח VS Code או צור תיקיית פרויקט."
         )
-        pending_prompts[sent.message_id] = prompt_data
         return True
 
-    if len(workspaces) == 1:
-        # Only one workspace — use it directly, no need to ask
+    # If only one VS Code window and no need to show menu
+    if len(workspaces) == 1 and not cli_dirs:
         prompt_data["project"] = workspaces[0]
         return False
 
-    # Multiple workspaces — store the pending prompt and show buttons
-    msg = await update.message.reply_text("⏳ מזהה חלונות VS Code...")
+    msg = await update.message.reply_text("⏳ מזהה פרויקטים...")
 
     buttons = []
+
+    # VS Code windows (IDE mode)
     for i, ws in enumerate(workspaces):
         buttons.append(
             [InlineKeyboardButton(
-                f"📁 {ws['name']}  ({ws['path']})",
+                f"🖥️ {ws['name']}",
                 callback_data=f"project:{i}",
             )]
         )
-    # Option to run without project context
+
+    # Separator + CLI options
+    cli_start_idx = len(workspaces)
+    all_workspaces = list(workspaces)  # copy
+
+    for j, cd in enumerate(cli_dirs):
+        # Skip if already shown as VS Code window
+        if any(ws.get("path") == cd["path"] for ws in workspaces):
+            continue
+        idx = len(all_workspaces)
+        all_workspaces.append({**cd, "_cli": True})
+        buttons.append(
+            [InlineKeyboardButton(
+                f"💻 {cd['name']}  (CLI)",
+                callback_data=f"project:{idx}",
+            )]
+        )
+
+    # Custom path option
     buttons.append(
-        [InlineKeyboardButton("🌐 ללא פרויקט ספציפי", callback_data="project:none")]
+        [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
     )
 
     keyboard = InlineKeyboardMarkup(buttons)
-
-    # Store the pending prompt with workspace list
-    prompt_data["workspaces"] = workspaces
+    prompt_data["workspaces"] = all_workspaces
     sent = await msg.edit_text(
-        "📂 *באיזה פרויקט לעבוד?*",
+        "📂 *באיזה פרויקט לעבוד?*\n\n"
+        "🖥️ = VS Code (IDE)  |  💻 = CLI",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -438,6 +473,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Text from {chat_id}: {text[:100]}...")
 
+    # Check if we're awaiting a custom path
+    if "awaiting_path" in pending_prompts:
+        prompt_data = pending_prompts.pop("awaiting_path")
+        path = text.strip().strip('"').strip("'")
+        if os.path.isdir(path):
+            name = os.path.basename(path)
+            prompt_data["project"] = {"name": name, "path": path}
+            prompt_data["mode"] = "cli"
+            _save_cli_history({"name": name, "path": path})
+            await update.message.reply_text(
+                f"💻 CLI: *{name}*\n⏳ מריץ Claude Code...",
+                parse_mode="Markdown",
+            )
+            await process_prompt(update, prompt_data)
+        else:
+            await update.message.reply_text(f"❌ הנתיב לא נמצא: `{path}`", parse_mode="Markdown")
+        return
+
     # Add to buffer
     if chat_id in _message_buffer:
         # Cancel the previous flush timer and append
@@ -617,8 +670,14 @@ async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ הבקשה פגה. שלח שוב.")
         return
 
-    data = query.data  # "project:0", "project:1", "project:none"
+    data = query.data  # "project:0", "project:1", "project:none", "project:custom"
     workspaces = prompt_data.get("workspaces", [])
+
+    if data == "project:custom":
+        # Ask user to type a path — store prompt and wait for next message
+        await query.edit_message_text("📝 שלח את הנתיב לתיקיית הפרויקט:")
+        pending_prompts["awaiting_path"] = prompt_data
+        return
 
     if data == "project:none":
         prompt_data["project"] = None
@@ -632,7 +691,20 @@ async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_
 
     project = prompt_data.get("project")
     if project:
-        await query.edit_message_text(f"📁 נבחר: *{project['name']}*", parse_mode="Markdown")
+        # Check if this is a CLI project
+        is_cli = project.get("_cli", False)
+        if is_cli:
+            prompt_data["mode"] = "cli"
+            _save_cli_history({"name": project["name"], "path": project["path"]})
+            await query.edit_message_text(
+                f"💻 CLI: *{project['name']}*\n⏳ מריץ Claude Code...",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                f"🖥️ נבחר: *{project['name']}*",
+                parse_mode="Markdown",
+            )
     else:
         await query.edit_message_text("🌐 עובד ללא פרויקט ספציפי.")
 
