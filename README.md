@@ -7,47 +7,52 @@ Send a prompt from Telegram, pick a project, and watch Claude Code work in your 
 ## How It Works
 
 ```
-Telegram Message
-    |
-    v
+You send a message on Telegram
+        |
+        v
 Bot detects open VS Code windows
-    |
-    v
+        |
+        v
 "Which project?" (inline buttons)
-    |
-    v
-Injects prompt into Claude Code in the selected VS Code window
-    |
-    v
+        |
+        v
+Injects prompt into Claude Code
+in the selected VS Code window
+        |
+        v
 Claude Code works (visible in IDE)
-    |
-    v
-Stop Hook sends output summary back to Telegram
+        |
+        v
+Stop Hook sends output summary
+back to Telegram
 ```
 
 ## Features
 
-- **Remote prompt injection** — Send prompts from Telegram directly into Claude Code running in VS Code
-- **Multi-project support** — Detects all open VS Code windows and lets you pick which project to work on
-- **Automatic output** — Claude Code's Stop hook sends results back to Telegram when done
-- **IDE-native** — Prompts run inside your actual Claude Code session with full project context (CLAUDE.md, files, git history)
-- **Smart message batching** — Multiple rapid messages are combined into a single prompt
-- **File attachments** — Send images (saved to project dir) and PDFs (text extracted and sent as prompt)
-- **Long output handling** — Short responses as messages, long ones as `.md` files
-- **Task scheduling** — Schedule daily recurring prompts with `/schedule HH:MM task`
-- **Authorized access only** — Only your `CHAT_ID` can interact with the bot
+- **Remote prompt injection** - Send prompts from Telegram directly into Claude Code running in VS Code
+- **Multi-project support** - Detects all open VS Code windows and lets you pick which project
+- **Automatic output** - Claude Code's Stop hook sends results back to Telegram when done
+- **IDE-native** - Prompts run inside your actual Claude Code session with full project context (CLAUDE.md, files, git history)
+- **Smart message batching** - Multiple rapid messages are combined into a single prompt
+- **File support** - Send images (saved to project dir) and PDFs (text extracted and sent as prompt)
+- **Long output as files** - Short responses as messages, long ones as `.md` file attachments
+- **Task scheduling** - Schedule daily recurring prompts with `/schedule HH:MM task`
+- **Authorized access only** - Only your `CHAT_ID` can interact with the bot
 
 ## Prerequisites
 
-- **Windows** (uses Win32 API for VS Code window detection)
+- **Windows 10/11** (uses Win32 API for VS Code window detection and keyboard simulation)
 - **Python 3.10+**
-- **Claude Code** installed in VS Code ([install guide](https://claude.ai/code))
+- **Claude Code** installed in VS Code ([marketplace](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code))
 - **Telegram Bot** token from [@BotFather](https://t.me/BotFather)
+- **Your Telegram User ID** from [@userinfobot](https://t.me/userinfobot)
 
 ## Installation
 
+### 1. Clone and set up
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-code-telegram-remote.git
+git clone https://github.com/bardaabraham-eng/claude-code-telegram-remote.git
 cd claude-code-telegram-remote
 
 python -m venv venv
@@ -56,39 +61,53 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Configuration
+### 2. Create a Telegram Bot
 
-### 1. Create your `.env` file
+1. Open Telegram and search for [@BotFather](https://t.me/BotFather)
+2. Send `/newbot`
+3. Choose a name (e.g. "My Dev Bot")
+4. Choose a username (e.g. "mydev_agent_bot")
+5. Copy the **API token** (looks like `123456789:ABCdefGHI...`)
+
+### 3. Get your Chat ID
+
+1. Open Telegram and search for [@userinfobot](https://t.me/userinfobot)
+2. Send any message to it
+3. It will reply with your **user ID** (a number like `178766456`)
+
+### 4. Configure environment
 
 ```bash
 copy .env.example .env
 ```
 
-Edit `.env` with your values:
+Edit `.env`:
 
 ```
 TELEGRAM_TOKEN=your-bot-token-from-botfather
 CHAT_ID=your-telegram-user-id
 ```
 
-**Get your Chat ID:** Send a message to [@userinfobot](https://t.me/userinfobot) on Telegram.
+### 5. Set up the Claude Code keyboard shortcut
 
-### 2. Set your Claude Code keyboard shortcut
-
-The bot needs to know which keyboard shortcut focuses the Claude Code input in VS Code.
+The bot needs a keyboard shortcut to focus the Claude Code input in VS Code.
 
 1. Open VS Code
-2. Press `Ctrl+Shift+P` > search "Claude"
-3. Find the command that focuses the chat input and note its keybinding
-4. Edit `ide_bridge.py` line with `pyautogui.hotkey(...)` to match your shortcut
+2. Press `Ctrl+K` then `Ctrl+S` to open Keyboard Shortcuts
+3. Search for `claude-vscode.focus`
+4. Assign it a shortcut (recommended: `Ctrl+Shift+F1`)
+5. Edit `ide_bridge.py` and update the `_hotkey` call in `send_prompt_to_ide()` to match your shortcut
 
-Default is `Ctrl+Shift+S`. Change it if yours differs.
+Default in code:
+```python
+_hotkey(VK_CONTROL, VK_SHIFT, VK_F1)  # Ctrl+Shift+F1
+```
 
-### 3. Install the Stop Hook (optional but recommended)
+### 6. Install the Stop Hook (recommended)
 
-This hook sends Claude Code's output back to Telegram automatically when it finishes working.
+This hook automatically sends Claude Code's output back to Telegram when it finishes working.
 
-Add to your `~/.claude/settings.json`:
+Add to your `~/.claude/settings.json` (merge with existing hooks if you have them):
 
 ```json
 {
@@ -99,7 +118,7 @@ Add to your `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python /full/path/to/notify_telegram.py",
+            "command": "python C:/full/path/to/notify_telegram.py",
             "timeout": 15
           }
         ]
@@ -109,9 +128,11 @@ Add to your `~/.claude/settings.json`:
 }
 ```
 
-Replace `/full/path/to/` with the actual path to your clone.
+Replace `C:/full/path/to/` with the actual path to your installation.
 
 ## Usage
+
+### Start the bot
 
 ```bash
 venv\Scripts\activate
@@ -132,57 +153,59 @@ python main.py
 ### Sending Prompts
 
 1. Send any text message to the bot
-2. If multiple VS Code windows are open, pick a project from the buttons
+2. If multiple VS Code windows are open, pick a project from the inline buttons
 3. The bot focuses the VS Code window, opens Claude Code, pastes your prompt, and presses Enter
 4. Claude Code works in the IDE (you can watch it if you're at the screen)
 5. When done, the Stop hook sends the summary back to Telegram
 
 ### Sending Files
 
-- **Images** — Saved to a temp file, Claude Code is told the path
-- **PDFs** — Text extracted with PyPDF2, sent as prompt text
-- **Other files** — Content read as text and sent as prompt
+- **Images** - Saved to project directory, Claude Code is told the file path
+- **PDFs** - Text extracted with PyPDF2, sent as prompt text
+- **Other files** - Content read as text and sent as prompt
 
 ## Architecture
 
 ```
-telegram_agent/
-├── main.py                 # Telegram bot — handlers, commands, message batching
+claude-code-telegram-remote/
+├── main.py                 # Telegram bot - handlers, commands, message batching
 ├── claude_agent.py         # Delegates to ide_bridge for prompt injection
-├── ide_bridge.py           # Windows automation — find VS Code, focus, paste, enter
-├── workspace_detector.py   # Detect open VS Code windows via Win32 API
-├── notify_telegram.py      # Stop hook — sends Claude Code output to Telegram
+├── ide_bridge.py           # Win32 automation - find VS Code, focus, paste, enter
+├── workspace_detector.py   # Detect open VS Code windows and resolve paths
+├── notify_telegram.py      # Stop hook - sends Claude Code output to Telegram
 ├── scheduler.py            # APScheduler for recurring tasks
 ├── config.py               # Loads .env, defines constants
-├── memory.py               # Conversation memory (for future use)
-├── tools.py                # Tool definitions (for future use)
+├── memory.py               # Conversation memory (reserved for future use)
+├── tools.py                # Tool definitions (reserved for future use)
 ├── .env.example            # Template for environment variables
 ├── .gitignore
 ├── requirements.txt
-├── LICENSE
+├── LICENSE                 # MIT
 └── README.md
 ```
 
 ## How VS Code Window Detection Works
 
-The bot uses the Win32 `EnumWindows` API to find all visible windows with titles ending in "Visual Studio Code". It extracts the project folder name from the window title and resolves it to a full path by checking common directories (`~/Desktop`, `~/Documents`, `~/Projects`, etc.) and VS Code's `storage.json`.
+The bot uses the Win32 `EnumWindows` API to find all visible windows with titles ending in "Visual Studio Code". It extracts the project folder name from the window title and resolves it to a full path by searching common directories (`~/Desktop`, `~/Documents`, `~/Projects`, etc.) and reading VS Code's `storage.json`.
 
 ## Limitations
 
-- **Windows only** — Uses Win32 API for window management and `pyautogui` for keyboard simulation
-- **VS Code must be visible** — Minimized windows may not receive input correctly
-- **Single monitor recommended** — Window focus can be unreliable across multiple displays
-- **Keyboard shortcut dependency** — You need to configure the correct shortcut for Claude Code focus
+- **Windows only** - Uses Win32 API for window management and `keybd_event` for keyboard simulation
+- **VS Code must be open** - At least one VS Code window with a project folder
+- **Claude Code must be installed** - The VS Code extension must be active
+- **Single keyboard shortcut** - You need to configure `claude-vscode.focus` keybinding
+- **Screen required** - The window focus mechanism needs a display (won't work headless)
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | "No VS Code window found" | Make sure VS Code is open with a folder (not just a file) |
-| Prompt not appearing in IDE | Check your keyboard shortcut in `ide_bridge.py` |
-| No output in Telegram | Verify the Stop hook is configured in `~/.claude/settings.json` |
+| Prompt not appearing in Claude Code | Verify your keyboard shortcut matches `ide_bridge.py` |
+| No output in Telegram | Check the Stop hook is configured in `~/.claude/settings.json` |
 | Bot not responding | Check `CHAT_ID` matches your Telegram user ID |
-| "Unauthorized message" in logs | Your chat ID doesn't match — update `.env` |
+| "Unauthorized message" in logs | Your chat ID doesn't match - update `.env` |
+| Window focuses but nothing happens | The keybinding may conflict - try a different shortcut |
 
 ## Contributing
 
