@@ -22,6 +22,8 @@ from telegram.ext import (
 from config import TELEGRAM_TOKEN, CHAT_ID, TELEGRAM_MSG_LIMIT
 from claude_agent import ClaudeAgent
 from scheduler import TaskScheduler
+from session_manager import SessionManager
+from streaming_cli import StreamingCLI
 from workspace_detector import get_vscode_workspaces
 
 # ---------------------------------------------------------------------------
@@ -38,6 +40,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 agent = ClaudeAgent()
 scheduler = TaskScheduler()
+sessions = SessionManager()
+
+# Active streaming sessions: project_path -> StreamingCLI
+active_streams: dict[str, StreamingCLI] = {}
 
 # Pending prompts waiting for project selection
 pending_prompts: dict[int, dict] = {}
@@ -264,6 +270,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*פקודות:*\n"
         "/status — חלונות פתוחים + סטטוס\n"
         "/open — פתיחת VS Code על פרויקט\n"
+        "/stop — עצירת Claude Code שרץ\n"
         "/clear — ניקוי בקשות ממתינות\n"
         "/schedule HH:MM משימה — תזמון משימה יומית\n"
         "/tasks — רשימת משימות מתוזמנות\n"
@@ -339,6 +346,20 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✏️ כתוב את *שם הפרויקט* או שלח *נתיב מלא*:",
         parse_mode="Markdown",
     )
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stop — cancel running CLI stream."""
+    if not authorized(update):
+        return
+    if not active_streams:
+        await update.message.reply_text("🤷 אין Claude Code רץ כרגע.")
+        return
+    for path, streamer in list(active_streams.items()):
+        streamer.cancel()
+        project_name = os.path.basename(path)
+        await update.message.reply_text(f"⛔ Claude Code בוטל: *{project_name}*", parse_mode="Markdown")
+    active_streams.clear()
 
 
 async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -630,56 +651,181 @@ async def process_prompt(source, prompt_data: dict):
     project_name = project["name"] if project else None
     mode = prompt_data.get("mode", "ide")
 
-    try:
-        if prompt_type == "text":
-            response = await asyncio.to_thread(
-                agent.process_text, prompt_data["content"], project_name, cwd_path, mode
-            )
-
-        elif prompt_type == "photo":
-            response = await asyncio.to_thread(
-                agent.process_image, prompt_data["image_bytes"],
-                prompt_data.get("caption", ""), project_name, cwd_path, mode
-            )
-
-        elif prompt_type == "document":
-            file_name = prompt_data["file_name"]
-            file_bytes = prompt_data["file_bytes"]
-            mime_type = prompt_data.get("mime_type", "")
-            caption = prompt_data.get("caption", "")
-
-            if file_name.lower().endswith(".pdf"):
-                response = await asyncio.to_thread(
-                    agent.process_pdf, file_bytes, caption, project_name, cwd_path, mode
-                )
-            elif mime_type.startswith("image/"):
-                response = await asyncio.to_thread(
-                    agent.process_image, file_bytes, caption, project_name, cwd_path, mode
-                )
+    # Build the actual prompt text
+    if prompt_type == "text":
+        prompt_text = prompt_data["content"]
+    elif prompt_type == "photo":
+        # Save image, build prompt
+        import tempfile
+        save_dir = cwd_path or os.path.join(os.path.expanduser("~"), "Desktop")
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=save_dir, prefix="telegram_") as f:
+                f.write(prompt_data["image_bytes"])
+                tmp_path = f.name
+            prompt_text = f"שמרתי תמונה בנתיב: {tmp_path}"
+            if prompt_data.get("caption"):
+                prompt_text += f"\n{prompt_data['caption']}"
             else:
-                try:
-                    file_text = file_bytes.decode("utf-8", errors="replace")
-                except Exception:
-                    file_text = "(Could not decode file)"
-                prompt = f"קיבלתי קובץ: {file_name}\n\nתוכן:\n{file_text[:5000]}"
-                if caption:
-                    prompt += f"\n\nבקשת המשתמש: {caption}"
-                response = await asyncio.to_thread(
-                    agent.process_text, prompt, project_name, cwd_path, mode
-                )
-        else:
-            response = "❌ סוג הודעה לא מוכר."
+                prompt_text += "\nתאר מה יש בתמונה."
+        except Exception as e:
+            await reply_func(f"❌ שגיאה בשמירת תמונה: {e}")
+            return
+    elif prompt_type == "document":
+        file_name = prompt_data["file_name"]
+        file_bytes = prompt_data["file_bytes"]
+        caption = prompt_data.get("caption", "")
+        mime_type = prompt_data.get("mime_type", "")
 
-        if mode == "cli":
-            # CLI mode — response is the actual output, send it directly
-            await reply_func(f"{project_header}{response}")
+        if file_name.lower().endswith(".pdf"):
+            import io as _io
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(_io.BytesIO(file_bytes))
+                parts = [p.extract_text() for p in reader.pages[:10] if p.extract_text()]
+                pdf_text = "\n".join(parts)[:3000]
+            except Exception as e:
+                pdf_text = f"(שגיאה: {e})"
+            prompt_text = f"תוכן PDF:\n{pdf_text}"
+            if caption:
+                prompt_text += f"\n\n{caption}"
+        elif mime_type.startswith("image/"):
+            import tempfile
+            save_dir = cwd_path or os.path.join(os.path.expanduser("~"), "Desktop")
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=save_dir, prefix="telegram_") as f:
+                f.write(file_bytes)
+                tmp_path = f.name
+            prompt_text = f"שמרתי תמונה: {tmp_path}"
+            if caption:
+                prompt_text += f"\n{caption}"
         else:
-            # IDE mode — actual output comes via Stop hook
+            try:
+                file_text = file_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                file_text = "(Could not decode)"
+            prompt_text = f"קובץ: {file_name}\n\nתוכן:\n{file_text[:5000]}"
+            if caption:
+                prompt_text += f"\n\n{caption}"
+    else:
+        await reply_func("❌ סוג הודעה לא מוכר.")
+        return
+
+    try:
+        if mode == "ide":
+            # IDE mode — inject into VS Code
+            response = await asyncio.to_thread(
+                agent.process_text, prompt_text, project_name, cwd_path, "ide"
+            )
             await reply_func(f"{project_header}{response}\n\n💡 הפלט ישלח בהודעה נפרדת כש-Claude Code יסיים.")
+
+        else:
+            # CLI streaming mode
+            await _run_streaming_cli(reply_func, project_header, prompt_text,
+                                     cwd_path, project_name, prompt_data.get("session_id"))
 
     except Exception as e:
         logger.error(f"Error processing prompt: {e}")
         await reply_func(f"❌ שגיאה: {e}")
+
+
+async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
+                             cwd: str, project_name: str, session_id: str = None):
+    """Run CLI with streaming and update Telegram message in real time."""
+    # Get existing session or start new
+    if not session_id and cwd:
+        last = sessions.get_last_session(cwd)
+        if last:
+            session_id = last["id"]
+
+    # Send initial "working" message — this becomes the thread anchor
+    status_msg = await reply_func(f"{project_header}⏳ Claude Code עובד...")
+
+    # We'll update this message as text streams in
+    streamer = StreamingCLI()
+    if cwd:
+        active_streams[cwd] = streamer
+
+    collected_text = ""
+    last_update_time = 0
+    update_interval = 2.0  # Update Telegram every 2 seconds
+    loop = asyncio.get_event_loop()
+
+    done_event = asyncio.Event()
+    result_holder = {"text": "", "session_id": "", "error": ""}
+
+    def on_text(chunk):
+        nonlocal collected_text, last_update_time
+        collected_text += chunk
+        import time
+        now = time.time()
+        if now - last_update_time >= update_interval:
+            last_update_time = now
+            # Schedule a Telegram message update
+            asyncio.run_coroutine_threadsafe(
+                _update_streaming_msg(status_msg, project_header, collected_text),
+                loop,
+            )
+
+    def on_done(full_text, sid):
+        result_holder["text"] = full_text
+        result_holder["session_id"] = sid
+        loop.call_soon_threadsafe(done_event.set)
+
+    def on_error(err):
+        result_holder["error"] = err
+        loop.call_soon_threadsafe(done_event.set)
+
+    # Start streaming in background thread
+    streamer.run_streaming(
+        prompt=prompt,
+        cwd=cwd,
+        session_id=session_id,
+        on_text=on_text,
+        on_done=on_done,
+        on_error=on_error,
+    )
+
+    # Wait for completion
+    await done_event.wait()
+
+    # Clean up
+    if cwd and cwd in active_streams:
+        del active_streams[cwd]
+
+    if result_holder["error"]:
+        await _update_streaming_msg(status_msg, project_header,
+                                    result_holder["error"], final=True)
+        return
+
+    final_text = result_holder["text"]
+    sid = result_holder["session_id"]
+
+    # Save session
+    if sid and cwd:
+        label = prompt[:40].replace("\n", " ")
+        thread_id = status_msg.message_id if hasattr(status_msg, "message_id") else None
+        sessions.save_session(cwd, sid, label=label, thread_msg_id=thread_id)
+
+    # Final update
+    await _update_streaming_msg(status_msg, project_header, final_text, final=True)
+
+
+async def _update_streaming_msg(msg, header: str, text: str, final: bool = False):
+    """Update the streaming status message in Telegram."""
+    icon = "✅" if final else "⏳"
+    # Truncate for Telegram limit
+    max_len = TELEGRAM_MSG_LIMIT - len(header) - 20
+    display = text
+    if len(display) > max_len:
+        display = display[:max_len] + "\n\n... [קוצר]"
+
+    full = f"{header}{icon} {'סיים' if final else 'עובד...'}\n\n{display}"
+
+    try:
+        await msg.edit_text(full)
+    except Exception as e:
+        # Message might be too similar or other Telegram error
+        if "not modified" not in str(e).lower():
+            logger.warning(f"Could not update streaming msg: {e}")
 
 
 async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -795,6 +941,7 @@ def main():
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("open", cmd_open))
+    app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CallbackQueryHandler(handle_project_callback, pattern=r"^project:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
