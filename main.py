@@ -210,6 +210,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "4. התוצאה תחזור אליך לטלגרם\n\n"
         "*פקודות:*\n"
         "/status — חלונות פתוחים + סטטוס\n"
+        "/open — פתיחת VS Code על פרויקט\n"
         "/clear — ניקוי בקשות ממתינות\n"
         "/schedule HH:MM משימה — תזמון משימה יומית\n"
         "/tasks — רשימת משימות מתוזמנות\n"
@@ -249,6 +250,71 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 מנוע: Claude Code CLI\n"
     )
     await update.message.reply_text(status, parse_mode="Markdown")
+
+
+async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /open command — open VS Code on a project directory."""
+    if not authorized(update):
+        return
+
+    from workspace_detector import find_project_dirs
+    project_dirs = await asyncio.to_thread(find_project_dirs)
+
+    if not project_dirs:
+        await update.message.reply_text("❌ לא נמצאו תיקיות פרויקט.")
+        return
+
+    buttons = []
+    for i, pd in enumerate(project_dirs):
+        buttons.append(
+            [InlineKeyboardButton(
+                f"📂 {pd['name']}  ({pd['path']})",
+                callback_data=f"open:{i}",
+            )]
+        )
+
+    keyboard = InlineKeyboardMarkup(buttons)
+
+    msg = await update.message.reply_text(
+        "🖥️ *איזה פרויקט לפתוח ב-VS Code?*",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+    # Store project list for the callback
+    pending_prompts[msg.message_id] = {"type": "open", "workspaces": project_dirs}
+
+
+async def handle_open_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button press for /open project selection."""
+    query = update.callback_query
+    await query.answer()
+
+    msg_id = query.message.message_id
+    prompt_data = pending_prompts.pop(msg_id, None)
+
+    if not prompt_data or prompt_data.get("type") != "open":
+        await query.edit_message_text("❌ הבקשה פגה. שלח /open שוב.")
+        return
+
+    workspaces = prompt_data.get("workspaces", [])
+    try:
+        idx = int(query.data.split(":")[1])
+        project = workspaces[idx]
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ בחירה לא תקינה.")
+        return
+
+    path = project["path"]
+    name = project["name"]
+
+    await query.edit_message_text(f"⏳ פותח VS Code על *{name}*...", parse_mode="Markdown")
+
+    import subprocess
+    try:
+        subprocess.Popen(["code", path], shell=True)
+        await query.edit_message_text(f"✅ VS Code נפתח על *{name}*\n📂 `{path}`", parse_mode="Markdown")
+    except Exception as e:
+        await query.edit_message_text(f"❌ שגיאה בפתיחת VS Code: {e}")
 
 
 async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -603,6 +669,8 @@ def main():
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("open", cmd_open))
+    app.add_handler(CallbackQueryHandler(handle_open_callback, pattern=r"^open:"))
     app.add_handler(CallbackQueryHandler(handle_project_callback, pattern=r"^project:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

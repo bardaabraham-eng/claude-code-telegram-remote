@@ -201,14 +201,17 @@ def extract_summary_from_transcript(transcript_path: str) -> tuple[str, list[str
 
 def _extract_file_paths(tool_block: dict, files: list):
     """Extract file paths from tool_use blocks."""
+    import time
     name = tool_block.get("name", "")
     inp = tool_block.get("input", {})
+    now = time.time()
 
     # Write tool — check if file_path is an image
     if name in ("Write", "write_file"):
         path = inp.get("file_path", inp.get("path", ""))
         if path and _is_image(path) and os.path.exists(path):
-            if path not in files:
+            mtime = os.path.getmtime(path)
+            if (now - mtime) < 300 and path not in files:
                 files.append(path)
 
     # Bash tool — look for image paths in the command output
@@ -217,9 +220,11 @@ def _extract_file_paths(tool_block: dict, files: list):
         _find_image_paths_in_text(cmd, files)
 
 
-def _find_image_paths_in_text(text: str, files: list):
-    """Find image file paths mentioned in text."""
+def _find_image_paths_in_text(text: str, files: list, max_age_seconds: int = 300):
+    """Find image file paths mentioned in text. Only include files modified recently."""
     import re
+    import time
+    now = time.time()
     # Match common path patterns
     patterns = [
         r'[A-Za-z]:\\[^\s"\'<>|]+',   # Windows absolute paths
@@ -230,7 +235,9 @@ def _find_image_paths_in_text(text: str, files: list):
         for match in re.finditer(pattern, text):
             path = match.group().rstrip(".,;:)")
             if _is_image(path) and os.path.exists(path):
-                if path not in files:
+                # Only include if modified within max_age_seconds (default 5 min)
+                mtime = os.path.getmtime(path)
+                if (now - mtime) < max_age_seconds and path not in files:
                     files.append(path)
 
 
