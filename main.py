@@ -167,74 +167,75 @@ def _find_project_by_name(name: str, projects: list[dict]) -> list[dict]:
 
 async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
     """
-    Detect VS Code workspaces and CLI projects.
-    Shows a directory tree and asks user to type project name.
+    Show open VS Code windows as buttons + a CLI button.
+    Only VS Code windows — no disk scanning here.
     Returns True if selection was shown.
     """
     workspaces = await asyncio.to_thread(get_vscode_workspaces)
 
-    from workspace_detector import find_project_dirs
-    cli_dirs = await asyncio.to_thread(find_project_dirs)
-    cli_history = _load_cli_history()
+    if not workspaces:
+        # No VS Code — go straight to CLI selection
+        prompt_data["mode"] = "cli"
+        from workspace_detector import find_project_dirs
+        cli_dirs = await asyncio.to_thread(find_project_dirs)
+        cli_history = _load_cli_history()
+        cli_paths = {d["path"] for d in cli_dirs}
+        for h in cli_history:
+            if h["path"] not in cli_paths and os.path.isdir(h["path"]):
+                cli_dirs.insert(0, h)
+                cli_paths.add(h["path"])
 
-    # Merge history
-    cli_paths = {d["path"] for d in cli_dirs}
-    for h in cli_history:
-        if h["path"] not in cli_paths and os.path.isdir(h["path"]):
-            cli_dirs.insert(0, h)
-            cli_paths.add(h["path"])
+        if not cli_dirs:
+            await update.message.reply_text(
+                "❌ לא נמצאו חלונות VS Code ולא תיקיות פרויקט.\n"
+                "פתח VS Code או צור תיקיית פרויקט."
+            )
+            return True
 
-    if not workspaces and not cli_dirs:
-        await update.message.reply_text(
-            "❌ לא נמצאו חלונות VS Code ולא נמצאו תיקיות פרויקט.\n\n"
-            "פתח VS Code או צור תיקיית פרויקט."
+        msg = await update.message.reply_text("⏳ VS Code לא פתוח. עובר ל-CLI...")
+        buttons = []
+        for i, cd in enumerate(cli_dirs):
+            buttons.append(
+                [InlineKeyboardButton(f"💻 {cd['name']}", callback_data=f"project:{i}")]
+            )
+        buttons.append(
+            [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
         )
+        prompt_data["workspaces"] = [{**cd, "mode": "cli", "_cli": True} for cd in cli_dirs]
+        keyboard = InlineKeyboardMarkup(buttons)
+        sent = await msg.edit_text(
+            "💻 *מצב CLI — באיזה פרויקט?*",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+        pending_prompts[sent.message_id] = prompt_data
         return True
 
-    # Single VS Code window, no CLI — use directly
-    if len(workspaces) == 1 and not cli_dirs:
+    # Single VS Code window — use directly
+    if len(workspaces) == 1:
         prompt_data["project"] = workspaces[0]
         return False
 
-    # Build buttons for VS Code windows + CLI option
-    msg = await update.message.reply_text("⏳ מזהה פרויקטים...")
-
+    # Multiple VS Code windows — show buttons
+    msg = await update.message.reply_text("⏳ מזהה חלונות...")
     buttons = []
     all_workspaces = []
 
-    # VS Code windows as buttons (quick select)
     for i, ws in enumerate(workspaces):
         all_workspaces.append({"name": ws["name"], "path": ws["path"], "mode": "ide"})
         buttons.append(
-            [InlineKeyboardButton(
-                f"🖥️ {ws['name']}",
-                callback_data=f"project:{i}",
-            )]
+            [InlineKeyboardButton(f"🖥️ {ws['name']}", callback_data=f"project:{i}")]
         )
 
-    # Add CLI projects as buttons too (just name, no long path)
-    for cd in cli_dirs:
-        if any(ws.get("path") == cd["path"] for ws in workspaces):
-            continue
-        idx = len(all_workspaces)
-        all_workspaces.append({**cd, "mode": "cli", "_cli": True})
-        buttons.append(
-            [InlineKeyboardButton(
-                f"💻 {cd['name']}",
-                callback_data=f"project:{idx}",
-            )]
-        )
-
-    # Custom path option
+    # CLI option at the bottom
     buttons.append(
-        [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
+        [InlineKeyboardButton("💻 CLI (תיקייה אחרת)", callback_data="project:cli")]
     )
 
     keyboard = InlineKeyboardMarkup(buttons)
     prompt_data["workspaces"] = all_workspaces
     sent = await msg.edit_text(
-        "📂 *באיזה פרויקט לעבוד?*\n\n"
-        "🖥️ = IDE  |  💻 = CLI",
+        "📂 *באיזה פרויקט?*",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -697,9 +698,38 @@ async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_
     workspaces = prompt_data.get("workspaces", [])
 
     if data == "project:custom":
-        # Ask user to type a path — store prompt and wait for next message
         await query.edit_message_text("📝 שלח את הנתיב לתיקיית הפרויקט:")
         pending_prompts["awaiting_path"] = prompt_data
+        return
+
+    if data == "project:cli":
+        # User wants CLI mode — show CLI project list
+        from workspace_detector import find_project_dirs
+        cli_dirs = await asyncio.to_thread(find_project_dirs)
+        cli_history = _load_cli_history()
+        cli_paths = {d["path"] for d in cli_dirs}
+        for h in cli_history:
+            if h["path"] not in cli_paths and os.path.isdir(h["path"]):
+                cli_dirs.insert(0, h)
+                cli_paths.add(h["path"])
+
+        prompt_data["mode"] = "cli"
+        buttons = []
+        for i, cd in enumerate(cli_dirs):
+            buttons.append(
+                [InlineKeyboardButton(f"💻 {cd['name']}", callback_data=f"project:{i}")]
+            )
+        buttons.append(
+            [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
+        )
+        prompt_data["workspaces"] = [{**cd, "mode": "cli", "_cli": True} for cd in cli_dirs]
+        keyboard = InlineKeyboardMarkup(buttons)
+        sent = await query.edit_message_text(
+            "💻 *מצב CLI — באיזה פרויקט?*",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+        pending_prompts[sent.message_id] = prompt_data
         return
 
     if data == "project:none":
