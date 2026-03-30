@@ -126,6 +126,62 @@ def _resolve_folder_path(folder_name: str) -> str | None:
     return None
 
 
+def find_project_dirs() -> list[dict]:
+    """
+    Find project directories on disk (for CLI fallback when VS Code is closed).
+    Scans common locations for directories containing .git or CLAUDE.md.
+    """
+    results = []
+    seen = set()
+
+    roots = [
+        os.path.expanduser("~/Desktop"),
+        os.path.expanduser("~/Documents"),
+        os.path.expanduser("~/Projects"),
+        os.path.expanduser("~/repos"),
+        os.path.expanduser("~/source/repos"),
+    ]
+
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.listdir(root):
+                path = os.path.join(root, entry)
+                if not os.path.isdir(path):
+                    continue
+                # Check if it's a project (has .git or CLAUDE.md)
+                is_project = (
+                    os.path.exists(os.path.join(path, ".git"))
+                    or os.path.exists(os.path.join(path, "CLAUDE.md"))
+                )
+                if is_project and path not in seen:
+                    seen.add(path)
+                    results.append({"name": entry, "path": os.path.normpath(path)})
+
+                # Also check one level deeper (e.g., ~/Desktop/SU/Ayit)
+                if os.path.isdir(path):
+                    try:
+                        for sub in os.listdir(path):
+                            sub_path = os.path.join(path, sub)
+                            if not os.path.isdir(sub_path):
+                                continue
+                            is_sub_project = (
+                                os.path.exists(os.path.join(sub_path, ".git"))
+                                or os.path.exists(os.path.join(sub_path, "CLAUDE.md"))
+                            )
+                            if is_sub_project and sub_path not in seen:
+                                seen.add(sub_path)
+                                results.append({"name": sub, "path": os.path.normpath(sub_path)})
+                    except PermissionError:
+                        pass
+        except PermissionError:
+            pass
+
+    logger.info(f"Found {len(results)} project directories for CLI fallback")
+    return sorted(results, key=lambda x: x["name"])
+
+
 def _check_vscode_storage(folder_name: str) -> str | None:
     """Check VS Code's recent storage for the folder path."""
     try:

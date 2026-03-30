@@ -121,11 +121,40 @@ async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
     workspaces = await asyncio.to_thread(get_vscode_workspaces)
 
     if not workspaces:
-        await update.message.reply_text(
-            "❌ לא נמצאו חלונות VS Code פתוחים.\n\n"
-            "פתח VS Code עם תיקיית פרויקט ונסה שוב."
+        # No VS Code windows — offer CLI mode
+        prompt_data["mode"] = "cli"
+        # Try to find project directories for CLI fallback
+        from workspace_detector import find_project_dirs
+        project_dirs = await asyncio.to_thread(find_project_dirs)
+
+        if not project_dirs:
+            await update.message.reply_text(
+                "❌ לא נמצאו חלונות VS Code פתוחים ולא נמצאו תיקיות פרויקט.\n\n"
+                "פתח VS Code או צור תיקיית פרויקט."
+            )
+            return True
+
+        msg = await update.message.reply_text("⏳ VS Code לא פתוח. עובר למצב CLI...")
+
+        buttons = []
+        for i, pd in enumerate(project_dirs):
+            buttons.append(
+                [InlineKeyboardButton(
+                    f"💻 {pd['name']}  ({pd['path']})",
+                    callback_data=f"project:{i}",
+                )]
+            )
+
+        keyboard = InlineKeyboardMarkup(buttons)
+        prompt_data["workspaces"] = project_dirs
+        sent = await msg.edit_text(
+            "💻 *מצב CLI — באיזה פרויקט?*\n\n"
+            "VS Code לא פתוח. Claude Code ירוץ ב-CLI.",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
         )
-        return True  # Return True to stop processing
+        pending_prompts[sent.message_id] = prompt_data
+        return True
 
     if len(workspaces) == 1:
         # Only one workspace — use it directly, no need to ask
@@ -456,17 +485,18 @@ async def process_prompt(source, prompt_data: dict):
             return await bot.send_document(chat_id=chat_id, document=document, **kwargs)
 
     project_name = project["name"] if project else None
+    mode = prompt_data.get("mode", "ide")
 
     try:
         if prompt_type == "text":
             response = await asyncio.to_thread(
-                agent.process_text, prompt_data["content"], project_name
+                agent.process_text, prompt_data["content"], project_name, cwd_path, mode
             )
 
         elif prompt_type == "photo":
             response = await asyncio.to_thread(
                 agent.process_image, prompt_data["image_bytes"],
-                prompt_data.get("caption", ""), project_name
+                prompt_data.get("caption", ""), project_name, cwd_path, mode
             )
 
         elif prompt_type == "document":
@@ -477,11 +507,11 @@ async def process_prompt(source, prompt_data: dict):
 
             if file_name.lower().endswith(".pdf"):
                 response = await asyncio.to_thread(
-                    agent.process_pdf, file_bytes, caption, project_name
+                    agent.process_pdf, file_bytes, caption, project_name, cwd_path, mode
                 )
             elif mime_type.startswith("image/"):
                 response = await asyncio.to_thread(
-                    agent.process_image, file_bytes, caption, project_name
+                    agent.process_image, file_bytes, caption, project_name, cwd_path, mode
                 )
             else:
                 try:
@@ -492,13 +522,17 @@ async def process_prompt(source, prompt_data: dict):
                 if caption:
                     prompt += f"\n\nבקשת המשתמש: {caption}"
                 response = await asyncio.to_thread(
-                    agent.process_text, prompt, project_name
+                    agent.process_text, prompt, project_name, cwd_path, mode
                 )
         else:
             response = "❌ סוג הודעה לא מוכר."
 
-        # Send confirmation — the actual output will come via the Stop hook
-        await reply_func(f"{project_header}{response}\n\n💡 הפלט ישלח בהודעה נפרדת כש-Claude Code יסיים.")
+        if mode == "cli":
+            # CLI mode — response is the actual output, send it directly
+            await reply_func(f"{project_header}{response}")
+        else:
+            # IDE mode — actual output comes via Stop hook
+            await reply_func(f"{project_header}{response}\n\n💡 הפלט ישלח בהודעה נפרדת כש-Claude Code יסיים.")
 
     except Exception as e:
         logger.error(f"Error processing prompt: {e}")

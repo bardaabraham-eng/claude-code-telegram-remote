@@ -23,3 +23,6 @@ CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
 
 # Limits
 TELEGRAM_MSG_LIMIT = 4096
+
+# CLI fallback
+CLI_TIMEOUT = 300  # 5 minutes for claude -p
