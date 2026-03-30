@@ -147,19 +147,80 @@ async def send_file_if_needed(update: Update, text: str):
         await update.message.reply_document(document=buf)
 
 
+def _build_project_tree(workspaces: list[dict], cli_dirs: list[dict]) -> tuple[str, list[dict]]:
+    """
+    Build a directory tree display and a flat list of all projects.
+    Returns (tree_text, all_projects_list).
+    Each project in the list has: name, path, mode ('ide' or 'cli'), display_name.
+    """
+    all_projects = []
+    tree_lines = []
+
+    # Group CLI dirs by parent for tree display
+    from collections import defaultdict
+    parent_groups = defaultdict(list)
+
+    # IDE windows first
+    if workspaces:
+        tree_lines.append("🖥️ *VS Code (IDE):*")
+        for ws in workspaces:
+            all_projects.append({
+                "name": ws["name"], "path": ws["path"],
+                "mode": "ide", "display_name": ws["name"],
+            })
+            tree_lines.append(f"  ├ `{ws['name']}`")
+        tree_lines.append("")
+
+    # CLI dirs grouped by parent
+    cli_only = []
+    for cd in cli_dirs:
+        if any(ws.get("path") == cd["path"] for ws in workspaces):
+            continue
+        cli_only.append(cd)
+        parent = os.path.dirname(cd["path"])
+        parent_groups[parent].append(cd)
+
+    if cli_only:
+        tree_lines.append("💻 *CLI:*")
+        for parent, dirs in sorted(parent_groups.items()):
+            parent_short = parent.replace(os.path.expanduser("~"), "~")
+            tree_lines.append(f"  📂 `{parent_short}`")
+            for d in dirs:
+                all_projects.append({
+                    "name": d["name"], "path": d["path"],
+                    "mode": "cli", "display_name": d["name"],
+                    "_cli": True,
+                })
+                tree_lines.append(f"    ├ `{d['name']}`")
+        tree_lines.append("")
+
+    return "\n".join(tree_lines), all_projects
+
+
+def _find_project_by_name(name: str, projects: list[dict]) -> list[dict]:
+    """Find projects matching a name (case insensitive)."""
+    name_lower = name.lower().strip()
+    exact = [p for p in projects if p["name"].lower() == name_lower]
+    if exact:
+        return exact
+    # Partial match
+    partial = [p for p in projects if name_lower in p["name"].lower()]
+    return partial
+
+
 async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
     """
-    Detect VS Code workspaces and ask the user to pick one.
-    Always includes CLI option. Returns True if selection was shown.
+    Detect VS Code workspaces and CLI projects.
+    Shows a directory tree and asks user to type project name.
+    Returns True if selection was shown.
     """
     workspaces = await asyncio.to_thread(get_vscode_workspaces)
 
-    # Build CLI project list (disk scan + history)
     from workspace_detector import find_project_dirs
     cli_dirs = await asyncio.to_thread(find_project_dirs)
     cli_history = _load_cli_history()
 
-    # Merge history into cli_dirs (add any from history not already found)
+    # Merge history
     cli_paths = {d["path"] for d in cli_dirs}
     for h in cli_history:
         if h["path"] not in cli_paths and os.path.isdir(h["path"]):
@@ -173,55 +234,50 @@ async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
         )
         return True
 
-    # If only one VS Code window and no need to show menu
+    # Single VS Code window, no CLI — use directly
     if len(workspaces) == 1 and not cli_dirs:
         prompt_data["project"] = workspaces[0]
         return False
 
-    msg = await update.message.reply_text("⏳ מזהה פרויקטים...")
+    # Build tree
+    tree_text, all_projects = _build_project_tree(workspaces, cli_dirs)
 
-    buttons = []
-
-    # VS Code windows (IDE mode)
-    for i, ws in enumerate(workspaces):
+    # If only IDE windows (no CLI), use buttons for quick selection
+    if not cli_dirs and workspaces:
+        buttons = []
+        for i, ws in enumerate(workspaces):
+            buttons.append(
+                [InlineKeyboardButton(
+                    f"🖥️ {ws['name']}",
+                    callback_data=f"project:{i}",
+                )]
+            )
         buttons.append(
-            [InlineKeyboardButton(
-                f"🖥️ {ws['name']}",
-                callback_data=f"project:{i}",
-            )]
+            [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
         )
-
-    # Separator + CLI options
-    cli_start_idx = len(workspaces)
-    all_workspaces = list(workspaces)  # copy
-
-    for j, cd in enumerate(cli_dirs):
-        # Skip if already shown as VS Code window
-        if any(ws.get("path") == cd["path"] for ws in workspaces):
-            continue
-        idx = len(all_workspaces)
-        all_workspaces.append({**cd, "_cli": True})
-        buttons.append(
-            [InlineKeyboardButton(
-                f"💻 {cd['name']}  (CLI)",
-                callback_data=f"project:{idx}",
-            )]
+        keyboard = InlineKeyboardMarkup(buttons)
+        prompt_data["workspaces"] = [
+            {"name": ws["name"], "path": ws["path"], "mode": "ide"}
+            for ws in workspaces
+        ]
+        msg = await update.message.reply_text(
+            f"📂 *באיזה פרויקט?*\n\n{tree_text}",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
         )
+        pending_prompts[msg.message_id] = prompt_data
+        return True
 
-    # Custom path option
-    buttons.append(
-        [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
-    )
+    # Mixed or CLI only — show tree and ask to type name
+    prompt_data["_all_projects"] = all_projects
+    pending_prompts["awaiting_project_name"] = prompt_data
 
-    keyboard = InlineKeyboardMarkup(buttons)
-    prompt_data["workspaces"] = all_workspaces
-    sent = await msg.edit_text(
-        "📂 *באיזה פרויקט לעבוד?*\n\n"
-        "🖥️ = VS Code (IDE)  |  💻 = CLI",
-        reply_markup=keyboard,
+    await update.message.reply_text(
+        f"📂 *באיזה פרויקט לעבוד?*\n\n"
+        f"{tree_text}"
+        f"✏️ כתוב את *שם הפרויקט* או שלח *נתיב מלא*:",
         parse_mode="Markdown",
     )
-    pending_prompts[sent.message_id] = prompt_data
     return True
 
 
@@ -489,6 +545,71 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await process_prompt(update, prompt_data)
         else:
             await update.message.reply_text(f"❌ הנתיב לא נמצא: `{path}`", parse_mode="Markdown")
+        return
+
+    # Check if we're awaiting a project name from tree selection
+    if "awaiting_project_name" in pending_prompts:
+        prompt_data = pending_prompts.pop("awaiting_project_name")
+        input_text = text.strip().strip('"').strip("'")
+        all_projects = prompt_data.pop("_all_projects", [])
+
+        # Check if it's a full path
+        if os.path.isdir(input_text):
+            name = os.path.basename(input_text)
+            prompt_data["project"] = {"name": name, "path": input_text}
+            prompt_data["mode"] = "cli"
+            _save_cli_history({"name": name, "path": input_text})
+            await update.message.reply_text(
+                f"💻 CLI: *{name}*\n⏳ מריץ Claude Code...",
+                parse_mode="Markdown",
+            )
+            await process_prompt(update, prompt_data)
+            return
+
+        # Search by name
+        matches = _find_project_by_name(input_text, all_projects)
+
+        if len(matches) == 1:
+            project = matches[0]
+            prompt_data["project"] = project
+            if project.get("_cli") or project.get("mode") == "cli":
+                prompt_data["mode"] = "cli"
+                _save_cli_history({"name": project["name"], "path": project["path"]})
+                icon = "💻"
+            else:
+                icon = "🖥️"
+            await update.message.reply_text(
+                f"{icon} *{project['name']}*\n⏳ שולח...",
+                parse_mode="Markdown",
+            )
+            await process_prompt(update, prompt_data)
+
+        elif len(matches) > 1:
+            # Multiple matches — show buttons to disambiguate
+            buttons = []
+            prompt_data["workspaces"] = matches
+            for i, m in enumerate(matches):
+                icon = "🖥️" if m.get("mode") == "ide" else "💻"
+                parent = os.path.basename(os.path.dirname(m["path"]))
+                buttons.append(
+                    [InlineKeyboardButton(
+                        f"{icon} {m['name']} ({parent})",
+                        callback_data=f"project:{i}",
+                    )]
+                )
+            keyboard = InlineKeyboardMarkup(buttons)
+            msg = await update.message.reply_text(
+                f"🔍 נמצאו {len(matches)} פרויקטים עם השם *{input_text}*:",
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+            pending_prompts[msg.message_id] = prompt_data
+
+        else:
+            await update.message.reply_text(
+                f"❌ לא נמצא פרויקט בשם `{input_text}`\nשלח שם מדויק או נתיב מלא.",
+                parse_mode="Markdown",
+            )
         return
 
     # Add to buffer
