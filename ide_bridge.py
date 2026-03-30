@@ -89,27 +89,40 @@ def _force_focus_window(hwnd: int) -> bool:
         console_hwnd = ctypes.windll.kernel32.GetConsoleWindow()
         if console_hwnd and console_hwnd != hwnd:
             user32.ShowWindow(console_hwnd, 6)  # SW_MINIMIZE
-            time.sleep(0.3)
+            time.sleep(0.5)
 
-        # Now set target window to foreground
+        # Retry loop — try up to 3 times to get focus
+        for attempt in range(3):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            time.sleep(0.2)
+
+            current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+            target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+            user32.AttachThreadInput(current_thread, target_thread, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.AttachThreadInput(current_thread, target_thread, False)
+
+            time.sleep(0.5)
+
+            fg = user32.GetForegroundWindow()
+            if fg == hwnd:
+                logger.info(f"Window focused successfully (attempt {attempt + 1})")
+                return True
+            else:
+                logger.warning(f"Focus attempt {attempt + 1} failed: fg={fg}, target={hwnd}")
+                time.sleep(0.3)
+
+        # Last resort: minimize+restore target window itself
+        user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        time.sleep(0.3)
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        time.sleep(0.2)
-
-        current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
-        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-        user32.AttachThreadInput(current_thread, target_thread, True)
-        user32.BringWindowToTop(hwnd)
-        user32.SetForegroundWindow(hwnd)
-        user32.AttachThreadInput(current_thread, target_thread, False)
-
         time.sleep(0.5)
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
 
         fg = user32.GetForegroundWindow()
-        if fg == hwnd:
-            logger.info("Window focused successfully")
-        else:
-            logger.warning(f"Focus check: fg={fg}, target={hwnd}")
-
+        logger.info(f"Final focus result: fg={fg}, target={hwnd}, match={fg == hwnd}")
         return True
     except Exception as e:
         logger.error(f"Failed to focus window: {e}")
