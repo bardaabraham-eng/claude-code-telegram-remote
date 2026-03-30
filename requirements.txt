@@ -1,0 +1,10 @@
+python-telegram-bot
+requests
+beautifulsoup4
+PyPDF2
+duckduckgo-search
+apscheduler
+Pillow
+pyautogui
+pygetwindow
+pyperclip
