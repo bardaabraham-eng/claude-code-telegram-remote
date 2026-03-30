@@ -147,64 +147,21 @@ async def send_file_if_needed(update: Update, text: str):
         await update.message.reply_document(document=buf)
 
 
-def _build_project_tree(workspaces: list[dict], cli_dirs: list[dict]) -> tuple[str, list[dict]]:
-    """
-    Build a directory tree display and a flat list of all projects.
-    Returns (tree_text, all_projects_list).
-    Each project in the list has: name, path, mode ('ide' or 'cli'), display_name.
-    """
-    all_projects = []
-    tree_lines = []
 
-    # Group CLI dirs by parent for tree display
-    from collections import defaultdict
-    parent_groups = defaultdict(list)
-
-    # IDE windows first
-    if workspaces:
-        tree_lines.append("🖥️ *VS Code (IDE):*")
-        for ws in workspaces:
-            all_projects.append({
-                "name": ws["name"], "path": ws["path"],
-                "mode": "ide", "display_name": ws["name"],
-            })
-            tree_lines.append(f"  ├ `{ws['name']}`")
-        tree_lines.append("")
-
-    # CLI dirs grouped by parent
-    cli_only = []
-    for cd in cli_dirs:
-        if any(ws.get("path") == cd["path"] for ws in workspaces):
-            continue
-        cli_only.append(cd)
-        parent = os.path.dirname(cd["path"])
-        parent_groups[parent].append(cd)
-
-    if cli_only:
-        tree_lines.append("💻 *CLI:*")
-        for parent, dirs in sorted(parent_groups.items()):
-            parent_short = parent.replace(os.path.expanduser("~"), "~")
-            tree_lines.append(f"  📂 `{parent_short}`")
-            for d in dirs:
-                all_projects.append({
-                    "name": d["name"], "path": d["path"],
-                    "mode": "cli", "display_name": d["name"],
-                    "_cli": True,
-                })
-                tree_lines.append(f"    ├ `{d['name']}`")
-        tree_lines.append("")
-
-    return "\n".join(tree_lines), all_projects
+def _normalize_name(name: str) -> str:
+    """Normalize project name for fuzzy matching: lowercase, remove separators."""
+    return name.lower().replace("_", "").replace("-", "").replace(" ", "").replace(".", "")
 
 
 def _find_project_by_name(name: str, projects: list[dict]) -> list[dict]:
-    """Find projects matching a name (case insensitive)."""
-    name_lower = name.lower().strip()
-    exact = [p for p in projects if p["name"].lower() == name_lower]
+    """Find projects matching a name (fuzzy: ignores case, underscores, hyphens, spaces)."""
+    norm_input = _normalize_name(name)
+    # Exact normalized match
+    exact = [p for p in projects if _normalize_name(p["name"]) == norm_input]
     if exact:
         return exact
-    # Partial match
-    partial = [p for p in projects if name_lower in p["name"].lower()]
+    # Partial normalized match
+    partial = [p for p in projects if norm_input in _normalize_name(p["name"])]
     return partial
 
 
@@ -239,45 +196,49 @@ async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
         prompt_data["project"] = workspaces[0]
         return False
 
-    # Build tree
-    tree_text, all_projects = _build_project_tree(workspaces, cli_dirs)
+    # Build buttons for VS Code windows + CLI option
+    msg = await update.message.reply_text("⏳ מזהה פרויקטים...")
 
-    # If only IDE windows (no CLI), use buttons for quick selection
-    if not cli_dirs and workspaces:
-        buttons = []
-        for i, ws in enumerate(workspaces):
-            buttons.append(
-                [InlineKeyboardButton(
-                    f"🖥️ {ws['name']}",
-                    callback_data=f"project:{i}",
-                )]
-            )
+    buttons = []
+    all_workspaces = []
+
+    # VS Code windows as buttons (quick select)
+    for i, ws in enumerate(workspaces):
+        all_workspaces.append({"name": ws["name"], "path": ws["path"], "mode": "ide"})
         buttons.append(
-            [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
+            [InlineKeyboardButton(
+                f"🖥️ {ws['name']}",
+                callback_data=f"project:{i}",
+            )]
         )
-        keyboard = InlineKeyboardMarkup(buttons)
-        prompt_data["workspaces"] = [
-            {"name": ws["name"], "path": ws["path"], "mode": "ide"}
-            for ws in workspaces
-        ]
-        msg = await update.message.reply_text(
-            f"📂 *באיזה פרויקט?*\n\n{tree_text}",
-            reply_markup=keyboard,
-            parse_mode="Markdown",
+
+    # Add CLI projects as buttons too (just name, no long path)
+    for cd in cli_dirs:
+        if any(ws.get("path") == cd["path"] for ws in workspaces):
+            continue
+        idx = len(all_workspaces)
+        all_workspaces.append({**cd, "mode": "cli", "_cli": True})
+        buttons.append(
+            [InlineKeyboardButton(
+                f"💻 {cd['name']}",
+                callback_data=f"project:{idx}",
+            )]
         )
-        pending_prompts[msg.message_id] = prompt_data
-        return True
 
-    # Mixed or CLI only — show tree and ask to type name
-    prompt_data["_all_projects"] = all_projects
-    pending_prompts["awaiting_project_name"] = prompt_data
+    # Custom path option
+    buttons.append(
+        [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
+    )
 
-    await update.message.reply_text(
-        f"📂 *באיזה פרויקט לעבוד?*\n\n"
-        f"{tree_text}"
-        f"✏️ כתוב את *שם הפרויקט* או שלח *נתיב מלא*:",
+    keyboard = InlineKeyboardMarkup(buttons)
+    prompt_data["workspaces"] = all_workspaces
+    sent = await msg.edit_text(
+        "📂 *באיזה פרויקט לעבוד?*\n\n"
+        "🖥️ = IDE  |  💻 = CLI",
+        reply_markup=keyboard,
         parse_mode="Markdown",
     )
+    pending_prompts[sent.message_id] = prompt_data
     return True
 
 
@@ -355,57 +316,28 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ לא נמצאו תיקיות פרויקט.")
         return
 
-    buttons = []
-    for i, pd in enumerate(project_dirs):
-        buttons.append(
-            [InlineKeyboardButton(
-                f"📂 {pd['name']}  ({pd['path']})",
-                callback_data=f"open:{i}",
-            )]
-        )
+    # Build tree display
+    from collections import defaultdict
+    parent_groups = defaultdict(list)
+    for pd in project_dirs:
+        parent = os.path.dirname(pd["path"])
+        parent_groups[parent].append(pd)
 
-    keyboard = InlineKeyboardMarkup(buttons)
+    tree_lines = []
+    for parent, dirs in sorted(parent_groups.items()):
+        parent_short = parent.replace(os.path.expanduser("~"), "~")
+        tree_lines.append(f"📂 `{parent_short}`")
+        for d in dirs:
+            tree_lines.append(f"  ├ `{d['name']}`")
 
-    msg = await update.message.reply_text(
-        "🖥️ *איזה פרויקט לפתוח ב-VS Code?*",
-        reply_markup=keyboard,
+    pending_prompts["awaiting_open_name"] = {"projects": project_dirs}
+
+    await update.message.reply_text(
+        f"🖥️ *איזה פרויקט לפתוח ב-VS Code?*\n\n"
+        f"{chr(10).join(tree_lines)}\n\n"
+        f"✏️ כתוב את *שם הפרויקט* או שלח *נתיב מלא*:",
         parse_mode="Markdown",
     )
-    # Store project list for the callback
-    pending_prompts[msg.message_id] = {"type": "open", "workspaces": project_dirs}
-
-
-async def handle_open_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline keyboard button press for /open project selection."""
-    query = update.callback_query
-    await query.answer()
-
-    msg_id = query.message.message_id
-    prompt_data = pending_prompts.pop(msg_id, None)
-
-    if not prompt_data or prompt_data.get("type") != "open":
-        await query.edit_message_text("❌ הבקשה פגה. שלח /open שוב.")
-        return
-
-    workspaces = prompt_data.get("workspaces", [])
-    try:
-        idx = int(query.data.split(":")[1])
-        project = workspaces[idx]
-    except (ValueError, IndexError):
-        await query.edit_message_text("❌ בחירה לא תקינה.")
-        return
-
-    path = project["path"]
-    name = project["name"]
-
-    await query.edit_message_text(f"⏳ פותח VS Code על *{name}*...", parse_mode="Markdown")
-
-    import subprocess
-    try:
-        subprocess.Popen(["code", path], shell=True)
-        await query.edit_message_text(f"✅ VS Code נפתח על *{name}*\n📂 `{path}`", parse_mode="Markdown")
-    except Exception as e:
-        await query.edit_message_text(f"❌ שגיאה בפתיחת VS Code: {e}")
 
 
 async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -529,6 +461,41 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Text from {chat_id}: {text[:100]}...")
 
+    # Check if we're awaiting a project name for /open
+    if "awaiting_open_name" in pending_prompts:
+        open_data = pending_prompts.pop("awaiting_open_name")
+        input_text = text.strip().strip('"').strip("'")
+        projects = open_data["projects"]
+
+        # Full path?
+        if os.path.isdir(input_text):
+            path = input_text
+            name = os.path.basename(path)
+        else:
+            matches = _find_project_by_name(input_text, [{"name": p["name"], "path": p["path"]} for p in projects])
+            if len(matches) == 1:
+                path = matches[0]["path"]
+                name = matches[0]["name"]
+            elif len(matches) > 1:
+                lines = [f"🔍 נמצאו {len(matches)}:"]
+                for m in matches:
+                    lines.append(f"  ├ `{m['name']}` ({m['path']})")
+                lines.append("\nכתוב שם מדויק יותר או נתיב מלא.")
+                pending_prompts["awaiting_open_name"] = open_data
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                return
+            else:
+                await update.message.reply_text(f"❌ לא נמצא: `{input_text}`", parse_mode="Markdown")
+                return
+
+        import subprocess
+        try:
+            subprocess.Popen(["code", path], shell=True)
+            await update.message.reply_text(f"✅ VS Code נפתח על *{name}*\n📂 `{path}`", parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ שגיאה: {e}")
+        return
+
     # Check if we're awaiting a custom path
     if "awaiting_path" in pending_prompts:
         prompt_data = pending_prompts.pop("awaiting_path")
@@ -545,71 +512,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await process_prompt(update, prompt_data)
         else:
             await update.message.reply_text(f"❌ הנתיב לא נמצא: `{path}`", parse_mode="Markdown")
-        return
-
-    # Check if we're awaiting a project name from tree selection
-    if "awaiting_project_name" in pending_prompts:
-        prompt_data = pending_prompts.pop("awaiting_project_name")
-        input_text = text.strip().strip('"').strip("'")
-        all_projects = prompt_data.pop("_all_projects", [])
-
-        # Check if it's a full path
-        if os.path.isdir(input_text):
-            name = os.path.basename(input_text)
-            prompt_data["project"] = {"name": name, "path": input_text}
-            prompt_data["mode"] = "cli"
-            _save_cli_history({"name": name, "path": input_text})
-            await update.message.reply_text(
-                f"💻 CLI: *{name}*\n⏳ מריץ Claude Code...",
-                parse_mode="Markdown",
-            )
-            await process_prompt(update, prompt_data)
-            return
-
-        # Search by name
-        matches = _find_project_by_name(input_text, all_projects)
-
-        if len(matches) == 1:
-            project = matches[0]
-            prompt_data["project"] = project
-            if project.get("_cli") or project.get("mode") == "cli":
-                prompt_data["mode"] = "cli"
-                _save_cli_history({"name": project["name"], "path": project["path"]})
-                icon = "💻"
-            else:
-                icon = "🖥️"
-            await update.message.reply_text(
-                f"{icon} *{project['name']}*\n⏳ שולח...",
-                parse_mode="Markdown",
-            )
-            await process_prompt(update, prompt_data)
-
-        elif len(matches) > 1:
-            # Multiple matches — show buttons to disambiguate
-            buttons = []
-            prompt_data["workspaces"] = matches
-            for i, m in enumerate(matches):
-                icon = "🖥️" if m.get("mode") == "ide" else "💻"
-                parent = os.path.basename(os.path.dirname(m["path"]))
-                buttons.append(
-                    [InlineKeyboardButton(
-                        f"{icon} {m['name']} ({parent})",
-                        callback_data=f"project:{i}",
-                    )]
-                )
-            keyboard = InlineKeyboardMarkup(buttons)
-            msg = await update.message.reply_text(
-                f"🔍 נמצאו {len(matches)} פרויקטים עם השם *{input_text}*:",
-                reply_markup=keyboard,
-                parse_mode="Markdown",
-            )
-            pending_prompts[msg.message_id] = prompt_data
-
-        else:
-            await update.message.reply_text(
-                f"❌ לא נמצא פרויקט בשם `{input_text}`\nשלח שם מדויק או נתיב מלא.",
-                parse_mode="Markdown",
-            )
         return
 
     # Add to buffer
@@ -863,7 +765,6 @@ def main():
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("open", cmd_open))
-    app.add_handler(CallbackQueryHandler(handle_open_callback, pattern=r"^open:"))
     app.add_handler(CallbackQueryHandler(handle_project_callback, pattern=r"^project:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
