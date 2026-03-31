@@ -36,6 +36,25 @@ TELEGRAM_MSG_LIMIT = 4096
 FILE_THRESHOLD = 1000  # Send as file if output exceeds this many chars
 
 
+def _get_topic_id(project_name: str) -> int | None:
+    """Look up the Forum Topic thread_id for a project from sessions file."""
+    try:
+        sessions_file = os.path.join(SCRIPT_DIR, ".sessions.json")
+        if not os.path.exists(sessions_file):
+            return None
+        with open(sessions_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for proj_data in data.get("projects", {}).values():
+            if os.path.basename(proj_data.get("path", "")).lower() == project_name.lower():
+                for s in proj_data.get("sessions", []):
+                    tid = s.get("thread_msg_id")
+                    if tid:
+                        return tid
+        return None
+    except Exception:
+        return None
+
+
 def send_telegram(text: str, project_name: str = "output"):
     """Send a message to Telegram. Long messages are sent as a .md file."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -44,14 +63,20 @@ def send_telegram(text: str, project_name: str = "output"):
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+    # Try to find the topic for this project
+    topic_id = _get_topic_id(project_name)
+
     if len(text) <= FILE_THRESHOLD:
         # Short enough — send as regular message(s)
         chunks = _split_text(text)
         for chunk in chunks:
             try:
+                payload = {"chat_id": CHAT_ID, "text": chunk}
+                if topic_id:
+                    payload["message_thread_id"] = topic_id
                 requests.post(
                     f"{base_url}/sendMessage",
-                    json={"chat_id": CHAT_ID, "text": chunk},
+                    json=payload,
                     timeout=10,
                 )
             except Exception as e:
@@ -63,17 +88,23 @@ def send_telegram(text: str, project_name: str = "output"):
             header = text[:300]
             if len(text) > 300:
                 header += "\n\n📄 הפלט המלא בקובץ המצורף..."
+            header_payload = {"chat_id": CHAT_ID, "text": header}
+            if topic_id:
+                header_payload["message_thread_id"] = topic_id
             requests.post(
                 f"{base_url}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": header},
+                json=header_payload,
                 timeout=10,
             )
 
             # Send the full output as a file
             file_name = f"{project_name}_output.md"
+            doc_data = {"chat_id": CHAT_ID}
+            if topic_id:
+                doc_data["message_thread_id"] = topic_id
             requests.post(
                 f"{base_url}/sendDocument",
-                data={"chat_id": CHAT_ID},
+                data=doc_data,
                 files={"document": (file_name, text.encode("utf-8"), "text/markdown")},
                 timeout=15,
             )
@@ -91,7 +122,7 @@ def send_telegram(text: str, project_name: str = "output"):
                     pass
 
 
-def send_telegram_photo(photo_path: str, caption: str = ""):
+def send_telegram_photo(photo_path: str, caption: str = "", topic_id: int = None):
     """Send a photo to Telegram."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
@@ -100,13 +131,15 @@ def send_telegram_photo(photo_path: str, caption: str = ""):
         with open(photo_path, "rb") as f:
             data = {"chat_id": CHAT_ID}
             if caption:
-                data["caption"] = caption[:1024]  # Telegram caption limit
+                data["caption"] = caption[:1024]
+            if topic_id:
+                data["message_thread_id"] = topic_id
             requests.post(url, data=data, files={"photo": f}, timeout=15)
     except Exception as e:
         print(f"Failed to send photo: {e}", file=sys.stderr)
 
 
-def send_telegram_document(file_path: str, caption: str = ""):
+def send_telegram_document(file_path: str, caption: str = "", topic_id: int = None):
     """Send a document/file to Telegram."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
@@ -116,6 +149,8 @@ def send_telegram_document(file_path: str, caption: str = ""):
             data = {"chat_id": CHAT_ID}
             if caption:
                 data["caption"] = caption[:1024]
+            if topic_id:
+                data["message_thread_id"] = topic_id
             requests.post(url, data=data, files={"document": f}, timeout=15)
     except Exception as e:
         print(f"Failed to send document: {e}", file=sys.stderr)
@@ -275,6 +310,9 @@ def main():
     # Extract project name from cwd
     project_name = os.path.basename(cwd) if cwd else "unknown"
 
+    # Get topic ID for this project
+    topic_id = _get_topic_id(project_name)
+
     # Get the last assistant message and any created images
     summary, image_paths = extract_summary_from_transcript(transcript_path)
 
@@ -289,11 +327,10 @@ def main():
         try:
             file_name = os.path.basename(img_path)
             _, ext = os.path.splitext(img_path.lower())
-            # SVGs can't be sent as photos — send as document
             if ext == ".svg":
-                send_telegram_document(img_path, f"📎 {file_name}")
+                send_telegram_document(img_path, f"📎 {file_name}", topic_id)
             else:
-                send_telegram_photo(img_path, f"🖼️ {file_name}")
+                send_telegram_photo(img_path, f"🖼️ {file_name}", topic_id)
         except Exception as e:
             print(f"Failed to send image {img_path}: {e}", file=sys.stderr)
 

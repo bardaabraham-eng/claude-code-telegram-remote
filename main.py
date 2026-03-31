@@ -21,6 +21,7 @@ from telegram.ext import (
 
 from config import TELEGRAM_TOKEN, CHAT_ID, TELEGRAM_MSG_LIMIT
 from claude_agent import ClaudeAgent
+from ide_bridge import close_vscode_window, is_vscode_open, open_vscode
 from scheduler import TaskScheduler
 from session_manager import SessionManager
 from streaming_cli import StreamingCLI
@@ -389,20 +390,22 @@ async def handle_ide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     path = session["project_path"]
-    sid = session["session_id"]
     name = session["project_name"]
 
-    await query.edit_message_text(f"⏳ פותח VS Code על *{name}* וטוען session...", parse_mode="Markdown")
+    await query.edit_message_text(f"⏳ עובר ל-IDE: *{name}*...", parse_mode="Markdown")
 
-    import subprocess
+    # 1. Stop any active CLI stream for this project
+    if path in active_streams:
+        active_streams[path].cancel()
+        del active_streams[path]
+        await asyncio.sleep(1)
+
+    # 2. Open VS Code on the project — it will auto-continue the last session
     try:
-        # Open VS Code on the project
-        subprocess.Popen(["code", path], shell=True)
-
+        await asyncio.to_thread(open_vscode, path)
         await query.edit_message_text(
             f"✅ VS Code נפתח על *{name}*\n\n"
-            f"📋 להמשך ה-session, הרץ ב-Claude Code:\n"
-            f"`claude --resume {sid}`",
+            f"Claude Code ימשיך את ה-session האחרון אוטומטית.",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -875,7 +878,13 @@ async def process_prompt(source, prompt_data: dict):
         from streaming_cli import find_latest_session_id
         latest_sid = find_latest_session_id(cwd_path) if cwd_path else None
 
-        # CLI streaming mode (default)
+        # If VS Code is open on this project, close it to free the session
+        if project_name and await asyncio.to_thread(is_vscode_open, project_name):
+            await reply_func(f"{project_header}🔄 סוגר VS Code לפני מעבר ל-CLI...")
+            await asyncio.to_thread(close_vscode_window, project_name)
+            await asyncio.sleep(2)  # Wait for VS Code to fully close
+
+        # CLI streaming mode
         await _run_streaming_cli(reply_func, project_header, prompt_text,
                                  cwd_path, project_name, latest_sid)
 

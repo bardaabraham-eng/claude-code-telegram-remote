@@ -1,51 +1,24 @@
 """
-Bridge to inject prompts into Claude Code running inside VS Code.
-Uses Windows API to find the correct VS Code window, focus it,
-and send keystrokes via keybd_event.
+Bridge between Telegram bot and VS Code.
+- Find VS Code windows by project name
+- Close VS Code window (to free the session for CLI)
+- Open VS Code on a project directory
 """
 
 import ctypes
 import ctypes.wintypes
 import logging
+import subprocess
 import time
-
-import pyperclip
 
 logger = logging.getLogger(__name__)
 
 user32 = ctypes.windll.user32
 
-# Key codes
-VK_CONTROL = 0x11
-VK_SHIFT = 0x10
-VK_RETURN = 0x0D
-VK_F1 = 0x70
-VK_V = 0x56
-KEYEVENTF_KEYUP = 0x0002
+WM_CLOSE = 0x0010
 
 
-def _key_down(vk):
-    user32.keybd_event(vk, 0, 0, 0)
-
-def _key_up(vk):
-    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-
-def _press(vk, delay=0.05):
-    _key_down(vk)
-    time.sleep(delay)
-    _key_up(vk)
-    time.sleep(delay)
-
-def _hotkey(*vks, delay=0.05):
-    for vk in vks:
-        _key_down(vk)
-        time.sleep(delay)
-    for vk in reversed(vks):
-        _key_up(vk)
-        time.sleep(delay)
-
-
-def _find_vscode_window(project_name: str) -> int | None:
+def find_vscode_window(project_name: str) -> int | None:
     """Find a VS Code window handle (hwnd) that contains the project name in its title."""
     results = []
 
@@ -73,100 +46,41 @@ def _find_vscode_window(project_name: str) -> int | None:
         logger.info(f"Found VS Code window: '{title}' (hwnd={hwnd})")
         return hwnd
 
-    logger.warning(f"No VS Code window found for project '{project_name}'")
     return None
 
 
-def _force_focus_window(hwnd: int) -> bool:
-    """Force bring a window to foreground."""
-    try:
-        # Restore if minimized
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            time.sleep(0.3)
-
-        # Find and minimize the bot's own console window to clear the way
-        console_hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-        if console_hwnd and console_hwnd != hwnd:
-            user32.ShowWindow(console_hwnd, 6)  # SW_MINIMIZE
-            time.sleep(0.5)
-
-        # Retry loop — try up to 3 times to get focus
-        for attempt in range(3):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            time.sleep(0.2)
-
-            current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
-            target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-            user32.AttachThreadInput(current_thread, target_thread, True)
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-            user32.AttachThreadInput(current_thread, target_thread, False)
-
-            time.sleep(0.5)
-
-            fg = user32.GetForegroundWindow()
-            if fg == hwnd:
-                logger.info(f"Window focused successfully (attempt {attempt + 1})")
-                return True
-            else:
-                logger.warning(f"Focus attempt {attempt + 1} failed: fg={fg}, target={hwnd}")
-                time.sleep(0.3)
-
-        # Last resort: minimize+restore target window itself
-        user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
-        time.sleep(0.3)
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        time.sleep(0.5)
-        user32.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-
-        fg = user32.GetForegroundWindow()
-        logger.info(f"Final focus result: fg={fg}, target={hwnd}, match={fg == hwnd}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to focus window: {e}")
+def close_vscode_window(project_name: str) -> bool:
+    """Close the VS Code window for the given project. Returns True if found and closed."""
+    hwnd = find_vscode_window(project_name)
+    if not hwnd:
+        logger.info(f"No VS Code window to close for '{project_name}'")
         return False
 
+    logger.info(f"Closing VS Code window for '{project_name}' (hwnd={hwnd})")
+    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
-def send_prompt_to_ide(project_name: str, prompt: str) -> tuple[bool, str]:
-    """
-    Send a prompt to Claude Code in the VS Code window for the given project.
-
-    Returns (success: bool, message: str)
-    """
-    try:
-        # 1. Find the VS Code window
-        hwnd = _find_vscode_window(project_name)
-        if hwnd is None:
-            return False, f"❌ לא נמצא חלון VS Code עבור '{project_name}'"
-
-        # 2. Force focus
-        if not _force_focus_window(hwnd):
-            return False, "❌ לא הצלחתי לפוקס את חלון VS Code"
-
-        # 3. Verify focus before sending keystrokes
-        fg = user32.GetForegroundWindow()
-        if fg != hwnd:
-            return False, "FOCUS_FAILED"
-
-        # 4. Ctrl+Shift+F1 to focus Claude Code input
-        time.sleep(0.3)
-        _hotkey(VK_CONTROL, VK_SHIFT, VK_F1)
-        time.sleep(1.0)
-
-        # 5. Copy prompt to clipboard and Ctrl+V to paste
-        pyperclip.copy(prompt)
-        time.sleep(0.1)
-        _hotkey(VK_CONTROL, VK_V)
+    # Wait for window to close
+    for _ in range(20):  # up to 10 seconds
         time.sleep(0.5)
+        if not user32.IsWindow(hwnd):
+            logger.info(f"VS Code window closed for '{project_name}'")
+            return True
 
-        # 6. Press Enter to submit
-        _press(VK_RETURN)
+    logger.warning(f"VS Code window for '{project_name}' did not close in time")
+    return True  # Proceed anyway
 
-        logger.info(f"Prompt sent to IDE for project '{project_name}': {prompt[:80]}...")
-        return True, f"הפרומפט נשלח ל-Claude Code בפרויקט {project_name}"
 
+def is_vscode_open(project_name: str) -> bool:
+    """Check if VS Code is open for the given project."""
+    return find_vscode_window(project_name) is not None
+
+
+def open_vscode(project_path: str) -> bool:
+    """Open VS Code on a project directory."""
+    try:
+        subprocess.Popen(["code", project_path], shell=True)
+        logger.info(f"Opened VS Code on '{project_path}'")
+        return True
     except Exception as e:
-        logger.error(f"Failed to send prompt to IDE: {e}")
-        return False, f"שגיאה בשליחת פרומפט ל-IDE: {e}"
+        logger.error(f"Failed to open VS Code: {e}")
+        return False
