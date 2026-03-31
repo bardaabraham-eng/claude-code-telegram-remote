@@ -50,6 +50,10 @@ class StreamingCLI:
                 cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
                 logger.info(f"CLI command: {cmd_str[:200]}")
 
+                # Set env var so the Stop hook knows not to send duplicate output
+                env = os.environ.copy()
+                env["TELEGRAM_BOT_SESSION"] = "1"
+
                 self._process = subprocess.Popen(
                     cmd_str,
                     stdout=subprocess.PIPE,
@@ -58,6 +62,7 @@ class StreamingCLI:
                     shell=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=env,
                 )
 
                 full_text = ""
