@@ -37,7 +37,7 @@ class StreamingCLI:
         self._cancelled = False
 
         def _run():
-            cmd = [CLAUDE_CMD, "-p", prompt, "--output-format", "stream-json"]
+            cmd = [CLAUDE_CMD, "-p", prompt, "--output-format", "stream-json", "--verbose"]
 
             if session_id:
                 cmd.extend(["--resume", session_id])
@@ -76,43 +76,33 @@ class StreamingCLI:
                     except json.JSONDecodeError:
                         continue
 
-                    # Extract text from different event types
                     event_type = event.get("type", "")
 
+                    # Track session ID from any event
+                    sid = event.get("session_id", "")
+                    if sid:
+                        result_session_id = sid
+
                     if event_type == "assistant":
-                        # Final message — extract full text and session ID
+                        # Assistant message — extract text content
                         msg = event.get("message", {})
                         content = msg.get("content", [])
                         for block in content:
                             if isinstance(block, dict) and block.get("type") == "text":
                                 text = block.get("text", "")
-                                if text and text != full_text:
+                                if text and len(text) > len(full_text):
                                     new_part = text[len(full_text):]
                                     if new_part and on_text:
                                         on_text(new_part)
                                     full_text = text
-                        # Try to get session ID
-                        sid = event.get("session_id", "")
-                        if sid:
-                            result_session_id = sid
-
-                    elif event_type == "content_block_delta":
-                        delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                full_text += text
-                                if on_text:
-                                    on_text(text)
 
                     elif event_type == "result":
-                        # Final result with session info
-                        sid = event.get("session_id", "")
-                        if sid:
-                            result_session_id = sid
+                        # Final result
                         result_text = event.get("result", "")
                         if result_text and not full_text:
                             full_text = result_text
+                            if on_text:
+                                on_text(result_text)
 
                     elif event_type == "error":
                         err = event.get("error", {})
