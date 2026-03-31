@@ -582,19 +582,55 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if we're awaiting a custom path
     if "awaiting_path" in pending_prompts:
         prompt_data = pending_prompts.pop("awaiting_path")
-        path = text.strip().strip('"').strip("'")
-        if os.path.isdir(path):
-            name = os.path.basename(path)
-            prompt_data["project"] = {"name": name, "path": path}
-            prompt_data["mode"] = "cli"
-            _save_cli_history({"name": name, "path": path})
-            await update.message.reply_text(
-                f"💻 CLI: *{name}*\n⏳ מריץ Claude Code...",
-                parse_mode="Markdown",
-            )
-            await process_prompt(update, prompt_data)
+        input_path = text.strip().strip('"').strip("'")
+
+        # Try as full path first
+        if os.path.isdir(input_path):
+            path = input_path
         else:
-            await update.message.reply_text(f"❌ הנתיב לא נמצא: `{path}`", parse_mode="Markdown")
+            # Try as folder name under common parent directories
+            path = None
+            roots = [
+                os.path.expanduser("~/Desktop"),
+                os.path.expanduser("~/Desktop/SU"),
+                os.path.expanduser("~/Documents"),
+                os.path.expanduser("~/Projects"),
+            ]
+            for root in roots:
+                candidate = os.path.join(root, input_path)
+                if os.path.isdir(candidate):
+                    path = candidate
+                    break
+
+            # Still not found — offer to create it
+            if not path:
+                default_parent = os.path.expanduser("~/Desktop/SU")
+                new_path = os.path.join(default_parent, input_path)
+                pending_prompts["awaiting_create_confirm"] = {
+                    **prompt_data,
+                    "new_path": new_path,
+                    "new_name": input_path,
+                }
+                buttons = [
+                    [InlineKeyboardButton(f"✅ צור ב-{new_path}", callback_data="create:yes")],
+                    [InlineKeyboardButton("❌ ביטול", callback_data="create:no")],
+                ]
+                await update.message.reply_text(
+                    f"📁 `{input_path}` לא נמצא.\n\nליצור תיקייה חדשה?",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    parse_mode="Markdown",
+                )
+                return
+
+        name = os.path.basename(path)
+        prompt_data["project"] = {"name": name, "path": path}
+        prompt_data["mode"] = "cli"
+        _save_cli_history({"name": name, "path": path})
+        await update.message.reply_text(
+            f"💻 CLI: *{name}*\n⏳ מריץ Claude Code...",
+            parse_mode="Markdown",
+        )
+        await process_prompt(update, prompt_data)
         return
 
     # Add to buffer
@@ -943,6 +979,37 @@ async def _update_streaming_msg(msg, header: str, text: str, final: bool = False
             logger.warning(f"Could not update streaming msg: {e}")
 
 
+async def handle_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle create directory confirmation."""
+    query = update.callback_query
+    await query.answer()
+
+    data = pending_prompts.pop("awaiting_create_confirm", None)
+    if not data:
+        await query.edit_message_text("❌ הבקשה פגה.")
+        return
+
+    if query.data == "create:no":
+        await query.edit_message_text("❌ בוטל.")
+        return
+
+    # Create the directory
+    new_path = data["new_path"]
+    new_name = data["new_name"]
+    try:
+        os.makedirs(new_path, exist_ok=True)
+        data["project"] = {"name": new_name, "path": new_path}
+        data["mode"] = "cli"
+        _save_cli_history({"name": new_name, "path": new_path})
+        await query.edit_message_text(
+            f"✅ תיקייה נוצרה: `{new_path}`\n⏳ מריץ Claude Code...",
+            parse_mode="Markdown",
+        )
+        await process_prompt(query, data)
+    except Exception as e:
+        await query.edit_message_text(f"❌ שגיאה ביצירת תיקייה: {e}")
+
+
 async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button press for project selection."""
     query = update.callback_query
@@ -1029,6 +1096,7 @@ def main():
     app.add_handler(CommandHandler("ide", cmd_ide))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CallbackQueryHandler(handle_ide_callback, pattern=r"^ide:"))
+    app.add_handler(CallbackQueryHandler(handle_create_callback, pattern=r"^create:"))
     app.add_handler(CallbackQueryHandler(handle_project_callback, pattern=r"^project:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
