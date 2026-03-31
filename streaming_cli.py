@@ -39,10 +39,9 @@ class StreamingCLI:
         def _run():
             cmd = [CLAUDE_CMD, "-p", prompt, "--output-format", "stream-json", "--verbose"]
 
-            if session_id:
-                cmd.extend(["--resume", session_id])
-            else:
-                cmd.append("-c")  # continue last session
+            # Always use -c (continue last session in this directory)
+            # --resume replays full history which causes issues
+            cmd.append("-c")
 
             logger.info(f"Streaming CLI: cwd={cwd}, session={session_id or 'continue'}, prompt={prompt[:80]}...")
 
