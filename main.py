@@ -675,6 +675,48 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Forum Topics management
+# ---------------------------------------------------------------------------
+
+# Cache of project_path -> thread_id
+_topic_cache: dict[str, int] = {}
+
+
+async def _get_or_create_topic(source, project_name: str, project_path: str) -> int | None:
+    """Get or create a Forum Topic for this project. Returns thread_id or None."""
+    # Check cache
+    if project_path in _topic_cache:
+        return _topic_cache[project_path]
+
+    # Check session manager for saved thread_id
+    last_session = sessions.get_last_session(project_path)
+    if last_session and last_session.get("thread_msg_id"):
+        _topic_cache[project_path] = last_session["thread_msg_id"]
+        return last_session["thread_msg_id"]
+
+    # Create new topic
+    try:
+        import requests as _requests
+        resp = _requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/createForumTopic",
+            json={"chat_id": CHAT_ID, "name": f"📁 {project_name}"},
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            thread_id = data["result"]["message_thread_id"]
+            _topic_cache[project_path] = thread_id
+            logger.info(f"Created topic '{project_name}' with thread_id={thread_id}")
+            return thread_id
+        else:
+            logger.warning(f"Failed to create topic: {data}")
+            return None
+    except Exception as e:
+        logger.error(f"Error creating topic: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Process prompt (after project selection)
 # ---------------------------------------------------------------------------
 
@@ -710,7 +752,27 @@ async def process_prompt(source, prompt_data: dict):
             return await bot.send_document(chat_id=chat_id, document=document, **kwargs)
 
     project_name = project["name"] if project else None
-    mode = prompt_data.get("mode", "ide")
+
+    # Create or reuse a Forum Topic for this project
+    thread_id = None
+    if project and cwd_path:
+        thread_id = await _get_or_create_topic(source, project_name, cwd_path)
+
+    # Override reply_func to send into the topic thread
+    if thread_id:
+        if isinstance(source, Update):
+            bot = source.message.get_bot()
+        else:
+            bot = source.get_bot()
+        chat_id = prompt_data.get("chat_id", CHAT_ID)
+
+        async def reply_func(text, **kwargs):
+            kwargs["message_thread_id"] = thread_id
+            return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+
+        async def reply_doc_func(document, **kwargs):
+            kwargs["message_thread_id"] = thread_id
+            return await bot.send_document(chat_id=chat_id, document=document, **kwargs)
 
     # Build the actual prompt text
     if prompt_type == "text":
@@ -852,11 +914,11 @@ async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
     final_text = result_holder["text"]
     sid = result_holder["session_id"]
 
-    # Save session
+    # Save session with topic thread_id
     if sid and cwd:
         label = prompt[:40].replace("\n", " ")
-        thread_id = status_msg.message_id if hasattr(status_msg, "message_id") else None
-        sessions.save_session(cwd, sid, label=label, thread_msg_id=thread_id)
+        topic_id = _topic_cache.get(cwd)
+        sessions.save_session(cwd, sid, label=label, thread_msg_id=topic_id)
 
     # Final update
     await _update_streaming_msg(status_msg, project_header, final_text, final=True)
