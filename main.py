@@ -178,73 +178,40 @@ def _find_project_by_name(name: str, projects: list[dict]) -> list[dict]:
 
 async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
     """
-    Show open VS Code windows as buttons + a CLI button.
-    Only VS Code windows — no disk scanning here.
+    Always CLI mode. Show project directories as buttons.
     Returns True if selection was shown.
     """
-    workspaces = await asyncio.to_thread(get_vscode_workspaces)
+    prompt_data["mode"] = "cli"
 
-    if not workspaces:
-        # No VS Code — go straight to CLI selection
-        prompt_data["mode"] = "cli"
-        from workspace_detector import find_project_dirs
-        cli_dirs = await asyncio.to_thread(find_project_dirs)
-        cli_history = _load_cli_history()
-        cli_paths = {d["path"] for d in cli_dirs}
-        for h in cli_history:
-            if h["path"] not in cli_paths and os.path.isdir(h["path"]):
-                cli_dirs.insert(0, h)
-                cli_paths.add(h["path"])
+    from workspace_detector import find_project_dirs
+    cli_dirs = await asyncio.to_thread(find_project_dirs)
+    cli_history = _load_cli_history()
+    cli_paths = {d["path"] for d in cli_dirs}
+    for h in cli_history:
+        if h["path"] not in cli_paths and os.path.isdir(h["path"]):
+            cli_dirs.insert(0, h)
+            cli_paths.add(h["path"])
 
-        if not cli_dirs:
-            await update.message.reply_text(
-                "❌ לא נמצאו חלונות VS Code ולא תיקיות פרויקט.\n"
-                "פתח VS Code או צור תיקיית פרויקט."
-            )
-            return True
-
-        msg = await update.message.reply_text("⏳ VS Code לא פתוח. עובר ל-CLI...")
-        buttons = []
-        for i, cd in enumerate(cli_dirs):
-            buttons.append(
-                [InlineKeyboardButton(f"💻 {cd['name']}", callback_data=f"project:{i}")]
-            )
-        buttons.append(
-            [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
-        )
-        prompt_data["workspaces"] = [{**cd, "mode": "cli", "_cli": True} for cd in cli_dirs]
-        keyboard = InlineKeyboardMarkup(buttons)
-        sent = await msg.edit_text(
-            "💻 *מצב CLI — באיזה פרויקט?*",
-            reply_markup=keyboard,
-            parse_mode="Markdown",
-        )
-        pending_prompts[sent.message_id] = prompt_data
+    if not cli_dirs:
+        await update.message.reply_text("❌ לא נמצאו תיקיות פרויקט.")
         return True
 
-    # Single VS Code window — use directly
-    if len(workspaces) == 1:
-        prompt_data["project"] = workspaces[0]
+    # Single project — use directly
+    if len(cli_dirs) == 1:
+        prompt_data["project"] = {**cli_dirs[0], "mode": "cli", "_cli": True}
         return False
 
-    # Multiple VS Code windows — show buttons
-    msg = await update.message.reply_text("⏳ מזהה חלונות...")
+    msg = await update.message.reply_text("⏳ מזהה פרויקטים...")
     buttons = []
-    all_workspaces = []
-
-    for i, ws in enumerate(workspaces):
-        all_workspaces.append({"name": ws["name"], "path": ws["path"], "mode": "ide"})
+    for i, cd in enumerate(cli_dirs):
         buttons.append(
-            [InlineKeyboardButton(f"🖥️ {ws['name']}", callback_data=f"project:{i}")]
+            [InlineKeyboardButton(f"💻 {cd['name']}", callback_data=f"project:{i}")]
         )
-
-    # CLI option at the bottom
     buttons.append(
-        [InlineKeyboardButton("💻 CLI (תיקייה אחרת)", callback_data="project:cli")]
+        [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
     )
-
+    prompt_data["workspaces"] = [{**cd, "mode": "cli", "_cli": True} for cd in cli_dirs]
     keyboard = InlineKeyboardMarkup(buttons)
-    prompt_data["workspaces"] = all_workspaces
     sent = await msg.edit_text(
         "📂 *באיזה פרויקט?*",
         reply_markup=keyboard,
@@ -273,7 +240,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. Claude Code ירוץ עם כל ההקשר של הפרויקט\n"
         "4. התוצאה תחזור אליך לטלגרם\n\n"
         "*פקודות:*\n"
-        "/status — חלונות פתוחים + סטטוס\n"
+        "/status — סטטוס\n"
+        "/ide — פתיחת VS Code עם session אחרון\n"
         "/open — פתיחת VS Code על פרויקט\n"
         "/stop — עצירת Claude Code שרץ\n"
         "/clear — ניקוי בקשות ממתינות\n"
@@ -351,6 +319,94 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✏️ כתוב את *שם הפרויקט* או שלח *נתיב מלא*:",
         parse_mode="Markdown",
     )
+
+
+async def cmd_ide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /ide — open VS Code and load a recent CLI session."""
+    if not authorized(update):
+        return
+
+    import time as _time
+    cutoff = _time.time() - 86400  # 24 hours
+
+    # Collect recent sessions from all projects
+    all_recent = []
+    for proj_key, proj_data in sessions._data.get("projects", {}).items():
+        path = proj_data.get("path", "")
+        for s in proj_data.get("sessions", []):
+            if s.get("last_used", 0) > cutoff:
+                all_recent.append({
+                    "session_id": s["id"],
+                    "label": s.get("label", s["id"][:8]),
+                    "project_path": path,
+                    "project_name": os.path.basename(path),
+                    "last_used": s["last_used"],
+                })
+
+    if not all_recent:
+        await update.message.reply_text("❌ אין sessions מהן24 שעות האחרונות.\nשלח הודעה רגילה כדי להתחיל session חדש.")
+        return
+
+    all_recent.sort(key=lambda x: x["last_used"], reverse=True)
+
+    buttons = []
+    for i, s in enumerate(all_recent[:10]):
+        import datetime
+        ts = datetime.datetime.fromtimestamp(s["last_used"]).strftime("%H:%M")
+        buttons.append(
+            [InlineKeyboardButton(
+                f"🖥️ {s['project_name']} — {s['label'][:30]} ({ts})",
+                callback_data=f"ide:{i}",
+            )]
+        )
+
+    keyboard = InlineKeyboardMarkup(buttons)
+    pending_prompts["ide_sessions"] = all_recent[:10]
+
+    await update.message.reply_text(
+        "🖥️ *טעינת session ב-VS Code*\n\n"
+        "בחר session לפתוח:",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+
+
+async def handle_ide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard for /ide session selection."""
+    query = update.callback_query
+    await query.answer()
+
+    recent = pending_prompts.pop("ide_sessions", None)
+    if not recent:
+        await query.edit_message_text("❌ הבקשה פגה. שלח /ide שוב.")
+        return
+
+    try:
+        idx = int(query.data.split(":")[1])
+        session = recent[idx]
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ בחירה לא תקינה.")
+        return
+
+    path = session["project_path"]
+    sid = session["session_id"]
+    name = session["project_name"]
+
+    await query.edit_message_text(f"⏳ פותח VS Code על *{name}* וטוען session...", parse_mode="Markdown")
+
+    import subprocess
+    try:
+        # Open VS Code on the project
+        subprocess.Popen(["code", path], shell=True)
+
+        await query.edit_message_text(
+            f"✅ VS Code נפתח על *{name}*\n\n"
+            f"📋 להמשך ה-session, הרץ ב-Claude Code:\n"
+            f"`claude --resume {sid}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ שגיאה: {e}")
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -715,24 +771,9 @@ async def process_prompt(source, prompt_data: dict):
         return
 
     try:
-        if mode == "ide":
-            # IDE mode — inject into VS Code
-            response = await asyncio.to_thread(
-                agent.process_text, prompt_text, project_name, cwd_path, "ide"
-            )
-            if response == "FOCUS_FAILED":
-                # Auto-fallback to CLI streaming
-                logger.info("IDE focus failed, falling back to CLI streaming")
-                await reply_func(f"{project_header}⚠️ VS Code לא בפוקוס. עובר ל-CLI...")
-                await _run_streaming_cli(reply_func, project_header, prompt_text,
-                                         cwd_path, project_name)
-            else:
-                await reply_func(f"{project_header}{response}\n\n💡 הפלט ישלח בהודעה נפרדת כש-Claude Code יסיים.")
-
-        else:
-            # CLI streaming mode
-            await _run_streaming_cli(reply_func, project_header, prompt_text,
-                                     cwd_path, project_name, prompt_data.get("session_id"))
+        # CLI streaming mode (default)
+        await _run_streaming_cli(reply_func, project_header, prompt_text,
+                                 cwd_path, project_name)
 
     except Exception as e:
         logger.error(f"Error processing prompt: {e}")
@@ -860,36 +901,6 @@ async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_
         pending_prompts["awaiting_path"] = prompt_data
         return
 
-    if data == "project:cli":
-        # User wants CLI mode — show CLI project list
-        from workspace_detector import find_project_dirs
-        cli_dirs = await asyncio.to_thread(find_project_dirs)
-        cli_history = _load_cli_history()
-        cli_paths = {d["path"] for d in cli_dirs}
-        for h in cli_history:
-            if h["path"] not in cli_paths and os.path.isdir(h["path"]):
-                cli_dirs.insert(0, h)
-                cli_paths.add(h["path"])
-
-        prompt_data["mode"] = "cli"
-        buttons = []
-        for i, cd in enumerate(cli_dirs):
-            buttons.append(
-                [InlineKeyboardButton(f"💻 {cd['name']}", callback_data=f"project:{i}")]
-            )
-        buttons.append(
-            [InlineKeyboardButton("📝 נתיב ידני...", callback_data="project:custom")]
-        )
-        prompt_data["workspaces"] = [{**cd, "mode": "cli", "_cli": True} for cd in cli_dirs]
-        keyboard = InlineKeyboardMarkup(buttons)
-        sent = await query.edit_message_text(
-            "💻 *מצב CLI — באיזה פרויקט?*",
-            reply_markup=keyboard,
-            parse_mode="Markdown",
-        )
-        pending_prompts[sent.message_id] = prompt_data
-        return
-
     if data == "project:none":
         prompt_data["project"] = None
     else:
@@ -953,7 +964,9 @@ def main():
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("open", cmd_open))
+    app.add_handler(CommandHandler("ide", cmd_ide))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CallbackQueryHandler(handle_ide_callback, pattern=r"^ide:"))
     app.add_handler(CallbackQueryHandler(handle_project_callback, pattern=r"^project:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
