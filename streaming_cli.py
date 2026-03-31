@@ -47,8 +47,12 @@ class StreamingCLI:
             logger.info(f"Streaming CLI: cwd={cwd}, session={session_id or 'continue'}, prompt={prompt[:80]}...")
 
             try:
+                # Build command string for shell
+                cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+                logger.info(f"CLI command: {cmd_str[:200]}")
+
                 self._process = subprocess.Popen(
-                    cmd,
+                    cmd_str,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=cwd,
@@ -60,7 +64,12 @@ class StreamingCLI:
                 full_text = ""
                 result_session_id = session_id or ""
 
-                for line in self._process.stdout:
+                # Read line by line (each JSON event is one line)
+                while True:
+                    line = self._process.stdout.readline()
+                    if not line:
+                        # Process ended
+                        break
                     if self._cancelled:
                         self._process.terminate()
                         if on_error:
@@ -74,9 +83,11 @@ class StreamingCLI:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
+                        logger.debug(f"Non-JSON line: {line[:100]}")
                         continue
 
                     event_type = event.get("type", "")
+                    logger.info(f"Stream event: {event_type}")
 
                     # Track session ID from any event
                     sid = event.get("session_id", "")
