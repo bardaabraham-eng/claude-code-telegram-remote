@@ -91,8 +91,13 @@ MESSAGE_BATCH_DELAY = 1.5  # seconds to wait for more messages before sending
 
 
 def authorized(update: Update) -> bool:
-    """Check that the message is from the authorized chat."""
-    return update.effective_chat.id == CHAT_ID
+    """Check that the message is from the authorized chat and not from the bot itself."""
+    if update.effective_chat.id != CHAT_ID:
+        return False
+    # Ignore messages from the bot itself (important in group chats)
+    if update.effective_user and update.effective_user.is_bot:
+        return False
+    return True
 
 
 async def send_long_message(update: Update, text: str):
@@ -715,7 +720,14 @@ async def process_prompt(source, prompt_data: dict):
             response = await asyncio.to_thread(
                 agent.process_text, prompt_text, project_name, cwd_path, "ide"
             )
-            await reply_func(f"{project_header}{response}\n\n💡 הפלט ישלח בהודעה נפרדת כש-Claude Code יסיים.")
+            if response == "FOCUS_FAILED":
+                # Auto-fallback to CLI streaming
+                logger.info("IDE focus failed, falling back to CLI streaming")
+                await reply_func(f"{project_header}⚠️ VS Code לא בפוקוס. עובר ל-CLI...")
+                await _run_streaming_cli(reply_func, project_header, prompt_text,
+                                         cwd_path, project_name)
+            else:
+                await reply_func(f"{project_header}{response}\n\n💡 הפלט ישלח בהודעה נפרדת כש-Claude Code יסיים.")
 
         else:
             # CLI streaming mode

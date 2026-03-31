@@ -145,18 +145,23 @@ def send_prompt_to_ide(project_name: str, prompt: str) -> tuple[bool, str]:
         if not _force_focus_window(hwnd):
             return False, "❌ לא הצלחתי לפוקס את חלון VS Code"
 
-        # 3. Ctrl+Shift+F1 to focus Claude Code input
+        # 3. Verify focus before sending keystrokes
+        fg = user32.GetForegroundWindow()
+        if fg != hwnd:
+            return False, "FOCUS_FAILED"
+
+        # 4. Ctrl+Shift+F1 to focus Claude Code input
         time.sleep(0.3)
         _hotkey(VK_CONTROL, VK_SHIFT, VK_F1)
         time.sleep(1.0)
 
-        # 4. Copy prompt to clipboard and Ctrl+V to paste
+        # 5. Copy prompt to clipboard and Ctrl+V to paste
         pyperclip.copy(prompt)
         time.sleep(0.1)
         _hotkey(VK_CONTROL, VK_V)
         time.sleep(0.5)
 
-        # 5. Press Enter to submit
+        # 6. Press Enter to submit
         _press(VK_RETURN)
 
         logger.info(f"Prompt sent to IDE for project '{project_name}': {prompt[:80]}...")
