@@ -63,12 +63,16 @@ class StreamingCLI:
 
                 full_text = ""
                 result_session_id = session_id or ""
+                got_result = False
+                # Track assistant message count — with --resume, history replays first.
+                # The LAST assistant message is the new response.
+                last_assistant_text = ""
+                assistant_count = 0
 
                 # Read line by line (each JSON event is one line)
                 while True:
                     line = self._process.stdout.readline()
                     if not line:
-                        # Process ended
                         break
                     if self._cancelled:
                         self._process.terminate()
@@ -83,37 +87,31 @@ class StreamingCLI:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
-                        logger.debug(f"Non-JSON line: {line[:100]}")
                         continue
 
                     event_type = event.get("type", "")
-                    logger.info(f"Stream event: {event_type}")
 
-                    # Track session ID from any event
+                    # Track session ID
                     sid = event.get("session_id", "")
                     if sid:
                         result_session_id = sid
 
                     if event_type == "assistant":
-                        # Assistant message — extract text content
+                        assistant_count += 1
                         msg = event.get("message", {})
                         content = msg.get("content", [])
+                        text_parts = []
                         for block in content:
                             if isinstance(block, dict) and block.get("type") == "text":
-                                text = block.get("text", "")
-                                if text and len(text) > len(full_text):
-                                    new_part = text[len(full_text):]
-                                    if new_part and on_text:
-                                        on_text(new_part)
-                                    full_text = text
+                                text_parts.append(block.get("text", ""))
+                        if text_parts:
+                            last_assistant_text = "\n".join(text_parts)
 
                     elif event_type == "result":
-                        # Final result
+                        got_result = True
                         result_text = event.get("result", "")
-                        if result_text and not full_text:
-                            full_text = result_text
-                            if on_text:
-                                on_text(result_text)
+                        if result_text:
+                            last_assistant_text = result_text
 
                     elif event_type == "error":
                         err = event.get("error", {})
@@ -121,6 +119,11 @@ class StreamingCLI:
                         if on_error:
                             on_error(f"❌ {err_msg}")
                         return
+
+                # Stream finished — send the final assistant text
+                full_text = last_assistant_text
+                if full_text and on_text:
+                    on_text(full_text)
 
                 # Wait for process to finish
                 self._process.wait(timeout=10)
