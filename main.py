@@ -583,6 +583,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "awaiting_path" in pending_prompts:
         prompt_data = pending_prompts.pop("awaiting_path")
         input_path = text.strip().strip('"').strip("'")
+        # Normalize: fix backslashes from Telegram, handle both / and \
+        input_path = input_path.replace("\\", os.sep).replace("/", os.sep)
 
         # Try as full path first
         if os.path.isdir(input_path):
@@ -869,9 +871,13 @@ async def process_prompt(source, prompt_data: dict):
         return
 
     try:
+        # Find the latest session (IDE or CLI) for this project
+        from streaming_cli import find_latest_session_id
+        latest_sid = find_latest_session_id(cwd_path) if cwd_path else None
+
         # CLI streaming mode (default)
         await _run_streaming_cli(reply_func, project_header, prompt_text,
-                                 cwd_path, project_name)
+                                 cwd_path, project_name, latest_sid)
 
     except Exception as e:
         logger.error(f"Error processing prompt: {e}")
