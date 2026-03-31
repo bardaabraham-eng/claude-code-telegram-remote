@@ -116,9 +116,19 @@ class StreamingCLI:
                 cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
                 logger.info(f"CLI command: {cmd_str[:200]}")
 
-                # Set env var so the Stop hook knows not to send duplicate output
+                # Set env var + lock file so Stop hook knows not to send duplicate
                 env = os.environ.copy()
                 env["TELEGRAM_BOT_SESSION"] = "1"
+
+                # Write lock file with session info
+                lock_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), ".bot_active_session"
+                )
+                try:
+                    with open(lock_path, "w") as lf:
+                        lf.write(result_session_id or "active")
+                except Exception:
+                    pass
 
                 self._process = subprocess.Popen(
                     cmd_str,
@@ -229,12 +239,16 @@ class StreamingCLI:
                     on_error(f"❌ {e}")
             finally:
                 self._process = None
-                # Cleanup prompt temp file
+                # Cleanup temp files
                 if prompt_path:
                     try:
                         os.unlink(prompt_path)
                     except Exception:
                         pass
+                try:
+                    os.unlink(lock_path)
+                except Exception:
+                    pass
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()

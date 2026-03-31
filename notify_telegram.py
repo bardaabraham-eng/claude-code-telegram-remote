@@ -249,8 +249,12 @@ def _is_image(path: str) -> bool:
 
 def main():
     # Skip if this is a session launched by the Telegram bot
-    # (the bot already sends the response to Telegram directly)
     if os.environ.get("TELEGRAM_BOT_SESSION"):
+        sys.exit(0)
+
+    # Skip if the bot has an active CLI session (lock file exists)
+    lock_path = os.path.join(SCRIPT_DIR, ".bot_active_session")
+    if os.path.exists(lock_path):
         sys.exit(0)
 
     # Read hook input from stdin

@@ -3,6 +3,7 @@
 *.env.local
 .cli_history.json
 .sessions.json
+.bot_active_session
 
 # Python
 __pycache__/
