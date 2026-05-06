@@ -21,7 +21,17 @@ venv/
 *.swp
 *.swo
 
+# Runtime & debug
+.bot.pid
+.prompt_*.md
+bot_debug.log
+*.jpg
+*.jpeg
+
 # OS
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Third-party
+.socraticodeignore

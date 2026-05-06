@@ -8,6 +8,7 @@ Bridge between Telegram bot and VS Code.
 import ctypes
 import ctypes.wintypes
 import logging
+import os
 import subprocess
 import time
 
@@ -78,7 +79,10 @@ def is_vscode_open(project_name: str) -> bool:
 def open_vscode(project_path: str) -> bool:
     """Open VS Code on a project directory."""
     try:
-        subprocess.Popen(["code", project_path], shell=True)
+        code_exe = r"C:\Users\User\AppData\Local\Programs\Microsoft VS Code\Code.exe"
+        env = os.environ.copy()
+        env.pop("ELECTRON_RUN_AS_NODE", None)
+        subprocess.Popen([code_exe, project_path], env=env)
         logger.info(f"Opened VS Code on '{project_path}'")
         return True
     except Exception as e:

@@ -34,6 +34,8 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     level=logging.INFO,
 )
+# Enable DEBUG for streaming_cli to diagnose event flow
+logging.getLogger("streaming_cli").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -48,6 +50,15 @@ active_streams: dict[str, StreamingCLI] = {}
 
 # Pending prompts waiting for project selection
 pending_prompts: dict[int, dict] = {}
+
+# Current model override (None = default)
+current_model: str | None = None
+
+AVAILABLE_MODELS = {
+    "opus": "claude-opus-4-6",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+}
 
 # CLI history file — remember directories used in CLI mode
 CLI_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cli_history.json")
@@ -152,10 +163,12 @@ async def send_long_message_to_chat(bot, chat_id: int, text: str):
 
 
 async def send_file_if_needed(update: Update, text: str):
-    """If the response is very long, also send it as a text file."""
+    """If the response is very long, also send it as a styled HTML file."""
     if len(text) > TELEGRAM_MSG_LIMIT * 3:
-        buf = io.BytesIO(text.encode("utf-8"))
-        buf.name = "response.txt"
+        from md_to_html import md_to_html
+        html_content = md_to_html(text)
+        buf = io.BytesIO(html_content.encode("utf-8"))
+        buf.name = "response.html"
         await update.message.reply_document(document=buf)
 
 
@@ -214,9 +227,9 @@ async def ask_project_selection(update: Update, prompt_data: dict) -> bool:
     prompt_data["workspaces"] = [{**cd, "mode": "cli", "_cli": True} for cd in cli_dirs]
     keyboard = InlineKeyboardMarkup(buttons)
     sent = await msg.edit_text(
-        "📂 *באיזה פרויקט?*",
+        "📂 <b>באיזה פרויקט?</b>",
         reply_markup=keyboard,
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     pending_prompts[sent.message_id] = prompt_data
     return True
@@ -232,24 +245,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
     await update.message.reply_text(
-        "🤖 *שלט רחוק ל-Claude Code!*\n\n"
+        "🤖 <b>שלט רחוק ל-Claude Code!</b>\n\n"
         "שלח פרומפט ואני אריץ אותו דרך Claude Code CLI "
         "ישירות על הפרויקט שתבחר.\n\n"
-        "*איך זה עובד:*\n"
+        "<b>איך זה עובד:</b>\n"
         "1. שלח הודעה עם מה שאתה רוצה\n"
         "2. אם יש כמה חלונות VS Code — תבחר פרויקט\n"
         "3. Claude Code ירוץ עם כל ההקשר של הפרויקט\n"
         "4. התוצאה תחזור אליך לטלגרם\n\n"
-        "*פקודות:*\n"
+        "<b>פקודות:</b>\n"
         "/status — סטטוס\n"
         "/ide — פתיחת VS Code עם session אחרון\n"
         "/open — פתיחת VS Code על פרויקט\n"
+        "/brief — סקירת כל הסשנים הפתוחים\n"
         "/stop — עצירת Claude Code שרץ\n"
         "/clear — ניקוי בקשות ממתינות\n"
         "/schedule HH:MM משימה — תזמון משימה יומית\n"
         "/tasks — רשימת משימות מתוזמנות\n"
         "/cancel ID — ביטול משימה מתוזמנת",
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 
@@ -278,12 +292,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws_lines = "  (אין חלונות VS Code פתוחים)"
 
     status = (
-        f"🟢 *סטטוס סוכן*\n\n"
-        f"🖥️ *חלונות VS Code:*\n{ws_lines}\n\n"
+        f"🟢 <b>סטטוס סוכן</b>\n\n"
+        f"🖥️ <b>חלונות VS Code:</b>\n{ws_lines}\n\n"
         f"📋 משימות מתוזמנות: {len(tasks)}\n"
         f"🤖 מנוע: Claude Code CLI\n"
     )
-    await update.message.reply_text(status, parse_mode="Markdown")
+    await update.message.reply_text(status, parse_mode="HTML")
 
 
 async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,29 +322,65 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tree_lines = []
     for parent, dirs in sorted(parent_groups.items()):
         parent_short = parent.replace(os.path.expanduser("~"), "~")
-        tree_lines.append(f"📂 `{parent_short}`")
+        tree_lines.append(f"📂 <code>{parent_short}</code>")
         for d in dirs:
-            tree_lines.append(f"  ├ `{d['name']}`")
+            tree_lines.append(f"  ├ <code>{d['name']}</code>")
 
     pending_prompts["awaiting_open_name"] = {"projects": project_dirs}
 
     await update.message.reply_text(
-        f"🖥️ *איזה פרויקט לפתוח ב-VS Code?*\n\n"
+        f"🖥️ <b>איזה פרויקט לפתוח ב-VS Code?</b>\n\n"
         f"{chr(10).join(tree_lines)}\n\n"
-        f"✏️ כתוב את *שם הפרויקט* או שלח *נתיב מלא*:",
-        parse_mode="Markdown",
+        f"✏️ כתוב את <b>שם הפרויקט</b> או שלח <b>נתיב מלא</b>:",
+        parse_mode="HTML",
     )
 
 
 async def cmd_ide(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /ide — open VS Code and load a recent CLI session."""
+    """Handle /ide — stop active CLI and open VS Code on the project."""
     if not authorized(update):
         return
 
+    # If there's exactly one active CLI stream, switch to IDE immediately
+    if len(active_streams) == 1:
+        path, streamer = next(iter(active_streams.items()))
+        name = os.path.basename(path)
+        await update.message.reply_text(f"⏳ עוצר CLI ופותח VS Code: <b>{name}</b>...", parse_mode="HTML")
+        streamer.cancel()
+        del active_streams[path]
+        await asyncio.sleep(1)
+        await asyncio.to_thread(open_vscode, path)
+        await update.message.reply_text(
+            f"✅ VS Code נפתח על <b>{name}</b>\n\n"
+            f"Claude Code ימשיך את ה-session האחרון אוטומטית.",
+            parse_mode="HTML",
+        )
+        return
+
+    # If multiple active streams, let user pick
+    if len(active_streams) > 1:
+        buttons = []
+        stream_list = list(active_streams.items())
+        for i, (path, _) in enumerate(stream_list):
+            name = os.path.basename(path)
+            buttons.append(
+                [InlineKeyboardButton(f"🖥️ {name}", callback_data=f"ide:{i}")]
+            )
+        pending_prompts["ide_sessions"] = [
+            {"project_path": p, "project_name": os.path.basename(p)}
+            for p, _ in stream_list
+        ]
+        await update.message.reply_text(
+            "🖥️ <b>איזה פרויקט להעביר ל-IDE?</b>",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+        return
+
+    # No active streams — check recent sessions
     import time as _time
     cutoff = _time.time() - 86400  # 24 hours
 
-    # Collect recent sessions from all projects
     all_recent = []
     for proj_key, proj_data in sessions._data.get("projects", {}).items():
         path = proj_data.get("path", "")
@@ -345,10 +395,21 @@ async def cmd_ide(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
 
     if not all_recent:
-        await update.message.reply_text("❌ אין sessions מהן24 שעות האחרונות.\nשלח הודעה רגילה כדי להתחיל session חדש.")
+        await update.message.reply_text("❌ אין sessions אחרונים.\nשלח הודעה רגילה כדי להתחיל session חדש.")
         return
 
     all_recent.sort(key=lambda x: x["last_used"], reverse=True)
+
+    # Single recent session — open immediately
+    if len(all_recent) == 1:
+        s = all_recent[0]
+        await update.message.reply_text(f"⏳ פותח VS Code: <b>{s['project_name']}</b>...", parse_mode="HTML")
+        await asyncio.to_thread(open_vscode, s["project_path"])
+        await update.message.reply_text(
+            f"✅ VS Code נפתח על <b>{s['project_name']}</b>",
+            parse_mode="HTML",
+        )
+        return
 
     buttons = []
     for i, s in enumerate(all_recent[:10]):
@@ -365,10 +426,9 @@ async def cmd_ide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_prompts["ide_sessions"] = all_recent[:10]
 
     await update.message.reply_text(
-        "🖥️ *טעינת session ב-VS Code*\n\n"
-        "בחר session לפתוח:",
+        "🖥️ <b>באיזה פרויקט לפתוח VS Code?</b>",
         reply_markup=keyboard,
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 
@@ -392,24 +452,64 @@ async def handle_ide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     path = session["project_path"]
     name = session["project_name"]
 
-    await query.edit_message_text(f"⏳ עובר ל-IDE: *{name}*...", parse_mode="Markdown")
+    await query.edit_message_text(f"⏳ עובר ל-IDE: <b>{name}</b>...", parse_mode="HTML")
 
-    # 1. Stop any active CLI stream for this project
+    # Stop any active CLI stream for this project
     if path in active_streams:
         active_streams[path].cancel()
         del active_streams[path]
         await asyncio.sleep(1)
 
-    # 2. Open VS Code on the project — it will auto-continue the last session
+    # Open VS Code on the project
     try:
         await asyncio.to_thread(open_vscode, path)
         await query.edit_message_text(
-            f"✅ VS Code נפתח על *{name}*\n\n"
+            f"✅ VS Code נפתח על <b>{name}</b>\n\n"
             f"Claude Code ימשיך את ה-session האחרון אוטומטית.",
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     except Exception as e:
         await query.edit_message_text(f"❌ שגיאה: {e}")
+
+
+async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /brief — show all open VS Code projects and their recent sessions."""
+    if not authorized(update):
+        return
+
+    await update.message.reply_text("⏳ סורק חלונות VS Code...")
+
+    workspaces = await asyncio.to_thread(get_vscode_workspaces)
+
+    if not workspaces:
+        await update.message.reply_text("❌ אין חלונות VS Code פתוחים כרגע.")
+        return
+
+    from streaming_cli import get_project_sessions
+    import datetime
+
+    lines = ["🖥️ <b>סשנים פתוחים:</b>\n"]
+
+    for ws in workspaces:
+        name = ws["name"]
+        path = ws["path"]
+        lines.append(f"📁 <b>{name}</b>")
+
+        sessions_list = await asyncio.to_thread(get_project_sessions, path, 3)
+        if sessions_list:
+            for i, s in enumerate(sessions_list, 1):
+                ts = datetime.datetime.fromtimestamp(s["mtime"]).strftime("%d/%m %H:%M")
+                # Escape HTML special chars in label
+                label = (s["label"]
+                         .replace("&", "&amp;")
+                         .replace("<", "&lt;")
+                         .replace(">", "&gt;"))
+                lines.append(f"  {i}. <code>{label}</code> ({ts})")
+        else:
+            lines.append("  <i>(אין סשנים)</i>")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,8 +522,65 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for path, streamer in list(active_streams.items()):
         streamer.cancel()
         project_name = os.path.basename(path)
-        await update.message.reply_text(f"⛔ Claude Code בוטל: *{project_name}*", parse_mode="Markdown")
+        await update.message.reply_text(f"⛔ Claude Code בוטל: <b>{project_name}</b>", parse_mode="HTML")
     active_streams.clear()
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /model — switch Claude model."""
+    global current_model
+    if not authorized(update):
+        return
+
+    text = update.message.text.strip()
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        # Show current model and options
+        current = current_model or "default (opus)"
+        buttons = []
+        for alias, full_name in AVAILABLE_MODELS.items():
+            marker = " ✓" if current_model == full_name else ""
+            buttons.append(
+                [InlineKeyboardButton(f"{alias}{marker}", callback_data=f"model:{alias}")]
+            )
+        buttons.append(
+            [InlineKeyboardButton("🔄 default", callback_data="model:default")]
+        )
+        await update.message.reply_text(
+            f"🤖 מודל נוכחי: <b>{current}</b>\n\nבחר מודל:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+        return
+
+    # Direct set: /model sonnet
+    alias = parts[1].strip().lower()
+    if alias == "default":
+        current_model = None
+        await update.message.reply_text("🤖 חזר למודל ברירת מחדל (opus)")
+    elif alias in AVAILABLE_MODELS:
+        current_model = AVAILABLE_MODELS[alias]
+        await update.message.reply_text(f"🤖 מודל הוחלף ל-<b>{alias}</b>", parse_mode="HTML")
+    else:
+        await update.message.reply_text(
+            f"❌ מודל לא מוכר: {alias}\nאפשרויות: {', '.join(AVAILABLE_MODELS.keys())}, default"
+        )
+
+
+async def handle_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle model selection buttons."""
+    global current_model
+    query = update.callback_query
+    await query.answer()
+
+    alias = query.data.split(":")[1]
+    if alias == "default":
+        current_model = None
+        await query.edit_message_text("🤖 חזר למודל ברירת מחדל (opus)")
+    elif alias in AVAILABLE_MODELS:
+        current_model = AVAILABLE_MODELS[alias]
+        await query.edit_message_text(f"🤖 מודל הוחלף ל-<b>{alias}</b>", parse_mode="HTML")
 
 
 async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,11 +611,11 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from telegram import Bot
 
             bot = Bot(token=TELEGRAM_TOKEN)
-            header = f"⏰ *משימה מתוזמנת:* {task_description}\n\n"
+            header = f"⏰ <b>משימה מתוזמנת:</b> {task_description}\n\n"
             full = header + response
             # Split if needed
             if len(full) <= TELEGRAM_MSG_LIMIT:
-                await bot.send_message(chat_id=CHAT_ID, text=full, parse_mode="Markdown")
+                await bot.send_message(chat_id=CHAT_ID, text=full, parse_mode="HTML")
             else:
                 await bot.send_message(
                     chat_id=CHAT_ID,
@@ -487,10 +644,10 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tasks:
         await update.message.reply_text("📋 אין משימות מתוזמנות.")
         return
-    lines = ["📋 *משימות מתוזמנות:*\n"]
+    lines = ["📋 <b>משימות מתוזמנות:</b>\n"]
     for t in tasks:
         lines.append(f"🔹 #{t['id']} | ⏰ {t['time']} | {t['description']}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -529,6 +686,17 @@ async def _flush_message_buffer(chat_id: int):
 
     prompt_data = {"type": "text", "content": combined_text, "chat_id": chat_id}
 
+    # If message came from a Forum Topic, auto-select the project
+    msg_thread_id = getattr(update.message, "message_thread_id", None)
+    if msg_thread_id:
+        project = _find_project_by_topic(msg_thread_id)
+        if project:
+            logger.info(f"Topic {msg_thread_id} → project {project['name']}")
+            prompt_data["project"] = project
+            prompt_data["mode"] = "cli"
+            await process_prompt(update, prompt_data)
+            return
+
     asked = await ask_project_selection(update, prompt_data)
     if asked:
         return
@@ -565,19 +733,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif len(matches) > 1:
                 lines = [f"🔍 נמצאו {len(matches)}:"]
                 for m in matches:
-                    lines.append(f"  ├ `{m['name']}` ({m['path']})")
+                    lines.append(f"  ├ <code>{m['name']}</code> ({m['path']})")
                 lines.append("\nכתוב שם מדויק יותר או נתיב מלא.")
                 pending_prompts["awaiting_open_name"] = open_data
-                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                await update.message.reply_text("\n".join(lines), parse_mode="HTML")
                 return
             else:
-                await update.message.reply_text(f"❌ לא נמצא: `{input_text}`", parse_mode="Markdown")
+                await update.message.reply_text(f"❌ לא נמצא: <code>{input_text}</code>", parse_mode="HTML")
                 return
 
         import subprocess
         try:
-            subprocess.Popen(["code", path], shell=True)
-            await update.message.reply_text(f"✅ VS Code נפתח על *{name}*\n📂 `{path}`", parse_mode="Markdown")
+            from ide_bridge import open_vscode
+            open_vscode(path)
+            await update.message.reply_text(f"✅ VS Code נפתח על <b>{name}</b>\n📂 <code>{path}</code>", parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"❌ שגיאה: {e}")
         return
@@ -621,9 +790,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("❌ ביטול", callback_data="create:no")],
                 ]
                 await update.message.reply_text(
-                    f"📁 `{input_path}` לא נמצא.\n\nליצור תיקייה חדשה?",
+                    f"📁 <code>{input_path}</code> לא נמצא.\n\nליצור תיקייה חדשה?",
                     reply_markup=InlineKeyboardMarkup(buttons),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
                 return
 
@@ -632,8 +801,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt_data["mode"] = "cli"
         _save_cli_history({"name": name, "path": path})
         await update.message.reply_text(
-            f"💻 CLI: *{name}*\n⏳ מריץ Claude Code...",
-            parse_mode="Markdown",
+            f"💻 CLI: <b>{name}</b>\n⏳ מריץ Claude Code...",
+            parse_mode="HTML",
         )
         await process_prompt(update, prompt_data)
         return
@@ -672,6 +841,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "chat_id": update.effective_chat.id,
         }
 
+        # Auto-select project from topic
+        msg_thread_id = getattr(update.message, "message_thread_id", None)
+        if msg_thread_id:
+            project = _find_project_by_topic(msg_thread_id)
+            if project:
+                prompt_data["project"] = project
+                prompt_data["mode"] = "cli"
+                await process_prompt(update, prompt_data)
+                return
+
         asked = await ask_project_selection(update, prompt_data)
         if asked:
             return
@@ -704,6 +883,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "caption": caption,
             "chat_id": update.effective_chat.id,
         }
+
+        # Auto-select project from topic
+        msg_thread_id = getattr(update.message, "message_thread_id", None)
+        if msg_thread_id:
+            project = _find_project_by_topic(msg_thread_id)
+            if project:
+                prompt_data["project"] = project
+                prompt_data["mode"] = "cli"
+                await process_prompt(update, prompt_data)
+                return
 
         asked = await ask_project_selection(update, prompt_data)
         if asked:
@@ -757,6 +946,26 @@ async def _get_or_create_topic(source, project_name: str, project_path: str) -> 
         return None
 
 
+def _find_project_by_topic(thread_id: int) -> dict | None:
+    """Reverse-lookup: find the project associated with a Forum Topic thread_id.
+    Returns {"name": ..., "path": ...} or None."""
+    # Check cache first
+    for path, tid in _topic_cache.items():
+        if tid == thread_id:
+            return {"name": os.path.basename(path), "path": path}
+
+    # Check sessions file
+    data = sessions._data.get("projects", {})
+    for proj_key, proj_data in data.items():
+        for s in proj_data.get("sessions", []):
+            if s.get("thread_msg_id") == thread_id:
+                proj_path = proj_data["path"]
+                # Update cache
+                _topic_cache[proj_path] = thread_id
+                return {"name": os.path.basename(proj_path), "path": proj_path}
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Process prompt (after project selection)
 # ---------------------------------------------------------------------------
@@ -774,7 +983,7 @@ async def process_prompt(source, prompt_data: dict):
     project_header = ""
     cwd_path = None
     if project:
-        project_header = f"📁 *{project['name']}*\n\n"
+        project_header = f"📁 <b>{project['name']}</b>\n\n"
         cwd_path = project["path"]
 
     # Determine how to send messages back
@@ -911,6 +1120,7 @@ async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
         active_streams[cwd] = streamer
 
     collected_text = ""
+    status_lines = []  # Recent tool status updates
     last_update_time = 0
     update_interval = 2.0  # Update Telegram every 2 seconds
     loop = asyncio.get_event_loop()
@@ -925,18 +1135,36 @@ async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
         now = time.time()
         if now - last_update_time >= update_interval:
             last_update_time = now
-            # Schedule a Telegram message update
             asyncio.run_coroutine_threadsafe(
-                _update_streaming_msg(status_msg, project_header, collected_text),
+                _update_streaming_msg(status_msg, project_header, collected_text,
+                                      status_lines=status_lines),
+                loop,
+            )
+
+    def on_status(status_text):
+        nonlocal last_update_time
+        status_lines.append(status_text)
+        # Keep only last 5 status lines
+        if len(status_lines) > 5:
+            status_lines.pop(0)
+        import time
+        now = time.time()
+        if now - last_update_time >= 1.5:  # Status updates slightly faster
+            last_update_time = now
+            asyncio.run_coroutine_threadsafe(
+                _update_streaming_msg(status_msg, project_header, collected_text,
+                                      status_lines=status_lines),
                 loop,
             )
 
     def on_done(full_text, sid):
+        logger.info(f"on_done called: text_len={len(full_text)} sid={sid} preview={full_text[:100]!r}")
         result_holder["text"] = full_text
         result_holder["session_id"] = sid
         loop.call_soon_threadsafe(done_event.set)
 
     def on_error(err):
+        logger.info(f"on_error called: {err[:200]!r}")
         result_holder["error"] = err
         loop.call_soon_threadsafe(done_event.set)
 
@@ -945,7 +1173,9 @@ async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
         prompt=prompt,
         cwd=cwd,
         session_id=session_id,
+        model=current_model,
         on_text=on_text,
+        on_status=on_status,
         on_done=on_done,
         on_error=on_error,
     )
@@ -972,19 +1202,33 @@ async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
         sessions.save_session(cwd, sid, label=label, thread_msg_id=topic_id)
 
     # Final update
+    logger.info(f"Final text before send: len={len(final_text)} preview={final_text[:100]!r}")
     await _update_streaming_msg(status_msg, project_header, final_text, final=True)
 
 
-async def _update_streaming_msg(msg, header: str, text: str, final: bool = False):
+async def _update_streaming_msg(msg, header: str, text: str,
+                                final: bool = False, status_lines: list = None):
     """Update the streaming status message in Telegram."""
     icon = "✅" if final else "⏳"
+
+    # Build status section
+    status_section = ""
+    if not final and status_lines:
+        status_section = "\n".join(status_lines[-3:]) + "\n\n"
+
     # Truncate for Telegram limit
-    max_len = TELEGRAM_MSG_LIMIT - len(header) - 20
+    overhead = len(header) + len(status_section) + 30
+    max_len = TELEGRAM_MSG_LIMIT - overhead
     display = text
     if len(display) > max_len:
         display = display[:max_len] + "\n\n... [קוצר]"
 
-    full = f"{header}{icon} {'סיים' if final else 'עובד...'}\n\n{display}"
+    if final:
+        full = f"{header}{icon} סיים\n\n{display}"
+    elif display:
+        full = f"{header}{icon} עובד...\n\n{status_section}{display}"
+    else:
+        full = f"{header}{icon} עובד...\n\n{status_section or 'מתחיל...'}"
 
     try:
         await msg.edit_text(full)
@@ -1017,8 +1261,8 @@ async def handle_create_callback(update: Update, context: ContextTypes.DEFAULT_T
         data["mode"] = "cli"
         _save_cli_history({"name": new_name, "path": new_path})
         await query.edit_message_text(
-            f"✅ תיקייה נוצרה: `{new_path}`\n⏳ מריץ Claude Code...",
-            parse_mode="Markdown",
+            f"✅ תיקייה נוצרה: <code>{new_path}</code>\n⏳ מריץ Claude Code...",
+            parse_mode="HTML",
         )
         await process_prompt(query, data)
     except Exception as e:
@@ -1063,13 +1307,13 @@ async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_
             prompt_data["mode"] = "cli"
             _save_cli_history({"name": project["name"], "path": project["path"]})
             await query.edit_message_text(
-                f"💻 CLI: *{project['name']}*\n⏳ מריץ Claude Code...",
-                parse_mode="Markdown",
+                f"💻 CLI: <b>{project['name']}</b>\n⏳ מריץ Claude Code...",
+                parse_mode="HTML",
             )
         else:
             await query.edit_message_text(
-                f"🖥️ נבחר: *{project['name']}*",
-                parse_mode="Markdown",
+                f"🖥️ נבחר: <b>{project['name']}</b>",
+                parse_mode="HTML",
             )
     else:
         await query.edit_message_text("🌐 עובד ללא פרויקט ספציפי.")
@@ -1082,6 +1326,29 @@ async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_
 # ---------------------------------------------------------------------------
 
 
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.pid")
+
+
+def _kill_other_bot_instances():
+    """Kill any other running instances of this bot using a PID file."""
+    import subprocess, time
+    my_pid = os.getpid()
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE) as f:
+                old_pid = int(f.read().strip())
+            if old_pid != my_pid:
+                subprocess.run(["taskkill", "/F", "/PID", str(old_pid)],
+                               capture_output=True, timeout=5)
+                logger.info(f"Killed old bot instance PID={old_pid}")
+                time.sleep(2)
+        except Exception:
+            pass
+    # Write our PID
+    with open(PID_FILE, "w") as f:
+        f.write(str(my_pid))
+
+
 def main():
     """Start the bot."""
     if not TELEGRAM_TOKEN:
@@ -1091,6 +1358,7 @@ def main():
         print("ERROR: Set the CHAT_ID environment variable.")
         return
 
+    _kill_other_bot_instances()
     logger.info("Starting Telegram Agent...")
 
     async def post_init(application):
@@ -1110,7 +1378,10 @@ def main():
     app.add_handler(CommandHandler("open", cmd_open))
     app.add_handler(CommandHandler("ide", cmd_ide))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CallbackQueryHandler(handle_ide_callback, pattern=r"^ide:"))
+    app.add_handler(CallbackQueryHandler(handle_model_callback, pattern=r"^model:"))
     app.add_handler(CallbackQueryHandler(handle_create_callback, pattern=r"^create:"))
     app.add_handler(CallbackQueryHandler(handle_project_callback, pattern=r"^project:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

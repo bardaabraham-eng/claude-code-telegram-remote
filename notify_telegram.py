@@ -98,14 +98,19 @@ def send_telegram(text: str, project_name: str = "output"):
             )
 
             # Send the full output as a file
-            file_name = f"{project_name}_output.md"
+            file_name = f"{project_name}_output.html"
+            # Robust import — script may be invoked from any cwd
+            if SCRIPT_DIR not in sys.path:
+                sys.path.insert(0, SCRIPT_DIR)
+            from md_to_html import md_to_html
+            html_content = md_to_html(text)
             doc_data = {"chat_id": CHAT_ID}
             if topic_id:
                 doc_data["message_thread_id"] = topic_id
             requests.post(
                 f"{base_url}/sendDocument",
                 data=doc_data,
-                files={"document": (file_name, text.encode("utf-8"), "text/markdown")},
+                files={"document": (file_name, html_content.encode("utf-8"), "text/html")},
                 timeout=15,
             )
         except Exception as e:
@@ -316,11 +321,28 @@ def main():
     # Get the last assistant message and any created images
     summary, image_paths = extract_summary_from_transcript(transcript_path)
 
-    if not summary:
-        send_telegram(f"✅ Claude Code סיים עבודה\n📁 {project_name}\n📂 {cwd}", project_name)
-    else:
-        message = f"✅ Claude Code סיים עבודה\n📁 {project_name}\n\n{summary}"
-        send_telegram(message, project_name)
+    # Skip notification if there's no real narrative — avoids spamming "✅ סיים"
+    # after every short turn, tool-only turn, or autonomous-loop wakeup.
+    summary_stripped = (summary or "").strip()
+    if not summary_stripped:
+        sys.exit(0)
+
+    # If the captured "last assistant message" is actually raw JSON (a tool
+    # payload that leaked into the text channel), don't notify either.
+    if summary_stripped.startswith("{") and summary_stripped.endswith("}"):
+        try:
+            json.loads(summary_stripped)
+            sys.exit(0)
+        except Exception:
+            pass
+
+    # If the message is just a brief acknowledgement (under N chars and no
+    # newlines), don't notify — the user is mid-conversation, not done.
+    if len(summary_stripped) < 80 and "\n" not in summary_stripped:
+        sys.exit(0)
+
+    message = f"✅ Claude Code סיים עבודה\n📁 {project_name}\n\n{summary}"
+    send_telegram(message, project_name)
 
     # Send any images that were created during the session
     for img_path in image_paths:
