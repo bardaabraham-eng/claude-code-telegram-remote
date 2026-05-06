@@ -1,8 +1,8 @@
 # Claude Code Telegram Remote
 
-Control Claude Code running in VS Code from your phone via Telegram.
+Control Claude Code from your phone via Telegram — in both VS Code (IDE mode) and CLI mode.
 
-Send a prompt from Telegram, pick a project, and watch Claude Code work in your IDE. Get output summaries back in Telegram automatically.
+Send a prompt from Telegram, pick a project, and watch Claude Code work. Get output summaries back in Telegram automatically. Supports dual-mode operation: IDE injection for VS Code and direct CLI streaming.
 
 ## How It Works
 
@@ -10,33 +10,38 @@ Send a prompt from Telegram, pick a project, and watch Claude Code work in your 
 You send a message on Telegram
         |
         v
-Bot detects open VS Code windows
+Bot detects the project
+(Forum Topic auto-detect / inline buttons / CLI mode)
         |
-        v
-"Which project?" (inline buttons)
-        |
-        v
-Injects prompt into Claude Code
-in the selected VS Code window
-        |
-        v
-Claude Code works (visible in IDE)
-        |
-        v
-Stop Hook sends output summary
-back to Telegram
+        +-----------+-----------+
+        |                       |
+   IDE Mode                 CLI Mode
+        |                       |
+Injects prompt into       Runs claude CLI
+Claude Code in VS Code    as subprocess
+        |                       |
+Claude Code works         Streams output
+(visible in IDE)          back in real-time
+        |                       |
+Stop Hook sends           Result sent as
+output to Telegram        message or HTML file
 ```
 
 ## Features
 
+- **Dual mode** - IDE mode (VS Code injection) and CLI mode (direct `claude` subprocess with streaming)
+- **Forum Topic auto-detection** - Messages in a Telegram Forum Topic auto-route to the associated project
 - **Remote prompt injection** - Send prompts from Telegram directly into Claude Code running in VS Code
 - **Multi-project support** - Detects all open VS Code windows and lets you pick which project
 - **Automatic output** - Claude Code's Stop hook sends results back to Telegram when done
+- **CLI streaming** - Real-time progress updates from Claude CLI with live message editing
 - **IDE-native** - Prompts run inside your actual Claude Code session with full project context (CLAUDE.md, files, git history)
 - **Smart message batching** - Multiple rapid messages are combined into a single prompt
 - **File support** - Send images (saved to project dir) and PDFs (text extracted and sent as prompt)
-- **Long output as files** - Short responses as messages, long ones as `.md` file attachments
+- **Long output as HTML** - Short responses as messages, long ones as styled dark-theme `.html` files
+- **Unicode prompt support** - Non-ASCII prompts (Hebrew, etc.) handled via temp file to avoid Windows encoding issues
 - **Task scheduling** - Schedule daily recurring prompts with `/schedule HH:MM task`
+- **Auto-start on boot** - VBS launcher for Windows Startup folder
 - **Authorized access only** - Only your `CHAT_ID` can interact with the bot
 
 ## Prerequisites
@@ -145,6 +150,7 @@ python main.py
 |---------|-------------|
 | `/start` | Show usage instructions |
 | `/status` | Show open VS Code windows and agent status |
+| `/ide` | Open VS Code on the current project |
 | `/clear` | Clear pending requests |
 | `/schedule HH:MM task` | Schedule a daily recurring task |
 | `/tasks` | List scheduled tasks |
@@ -171,12 +177,15 @@ claude-code-telegram-remote/
 ├── main.py                 # Telegram bot - handlers, commands, message batching
 ├── claude_agent.py         # Delegates to ide_bridge for prompt injection
 ├── ide_bridge.py           # Win32 automation - find VS Code, focus, paste, enter
+├── streaming_cli.py        # CLI mode - runs claude as subprocess, streams JSON output
 ├── workspace_detector.py   # Detect open VS Code windows and resolve paths
 ├── notify_telegram.py      # Stop hook - sends Claude Code output to Telegram
+├── md_to_html.py           # Markdown to styled dark-theme HTML converter
 ├── scheduler.py            # APScheduler for recurring tasks
 ├── config.py               # Loads .env, defines constants
 ├── memory.py               # Conversation memory (reserved for future use)
 ├── tools.py                # Tool definitions (reserved for future use)
+├── start_bot.vbs           # Silent Windows Startup launcher
 ├── .env.example            # Template for environment variables
 ├── .gitignore
 ├── requirements.txt
