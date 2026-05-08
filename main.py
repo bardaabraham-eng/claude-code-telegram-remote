@@ -1205,6 +1205,26 @@ async def _run_streaming_cli(reply_func, project_header: str, prompt: str,
     logger.info(f"Final text before send: len={len(final_text)} preview={final_text[:100]!r}")
     await _update_streaming_msg(status_msg, project_header, final_text, final=True)
 
+    # If the text was truncated, send the full output as an HTML file
+    overhead = len(project_header) + 30
+    if len(final_text) > TELEGRAM_MSG_LIMIT - overhead:
+        try:
+            from md_to_html import md_to_html
+            html_content = md_to_html(final_text)
+            buf = io.BytesIO(html_content.encode("utf-8"))
+            file_name = f"{project_name or 'output'}_response.html"
+            buf.name = file_name
+            chat_id = status_msg.chat_id
+            topic_id = _topic_cache.get(cwd)
+            kwargs = {}
+            if topic_id:
+                kwargs["message_thread_id"] = topic_id
+            await status_msg.get_bot().send_document(
+                chat_id=chat_id, document=buf, **kwargs
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send HTML file: {e}")
+
 
 async def _update_streaming_msg(msg, header: str, text: str,
                                 final: bool = False, status_lines: list = None):
