@@ -244,23 +244,20 @@ class StreamingCLI:
         def _run():
             import tempfile
 
-            MAX_CMD_PROMPT = 500  # Use temp file for anything non-trivial (avoids Windows encoding issues with Hebrew/Unicode)
-
             prompt_path = None
-            # Always use temp file for non-ASCII prompts or long prompts
-            if len(prompt) > MAX_CMD_PROMPT or not prompt.isascii():
-                # Save prompt to temp file to avoid Windows cmd encoding issues with Hebrew/Unicode
-                prompt_file = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".md", delete=False,
-                    encoding="utf-8", dir=cwd or None, prefix=".prompt_"
-                )
-                prompt_file.write(prompt)
-                prompt_file.close()
-                prompt_path = prompt_file.name
-                cli_prompt = f"Read the file {prompt_path} and follow the instructions in it."
-                logger.info(f"Saved prompt to temp file: {prompt_path}")
-            else:
-                cli_prompt = prompt
+            # SECURITY: ALWAYS route through a temp file. Previously short ASCII
+            # prompts were embedded directly into a shell=True command line —
+            # any " / & / | / ^ / % in a Telegram message broke quoting and
+            # could execute arbitrary commands. Temp-file path is uniform now.
+            prompt_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", delete=False,
+                encoding="utf-8", dir=cwd or None, prefix=".prompt_"
+            )
+            prompt_file.write(prompt)
+            prompt_file.close()
+            prompt_path = prompt_file.name
+            cli_prompt = f"Read the file {prompt_path} and follow the instructions in it."
+            logger.info(f"Saved prompt to temp file: {prompt_path}")
 
             cmd = [CLAUDE_CMD, "-p", cli_prompt,
                    "--output-format", "stream-json", "--verbose",
@@ -275,30 +272,19 @@ class StreamingCLI:
             logger.info(f"Streaming CLI: cwd={cwd}, session={session_id or 'continue'}, prompt={prompt[:80]}...")
 
             try:
-                # Build command string
-                cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
-                logger.info(f"CLI command: {cmd_str[:200]}")
-
-                # Set env var + lock file so Stop hook knows not to send duplicate
+                # Set env var so Stop hook knows not to send duplicate notification
                 env = os.environ.copy()
                 env["TELEGRAM_BOT_SESSION"] = "1"
+                # NOTE: lock-file logic removed 2026-06-10 — a stale file blocked the
+                # Stop hook silently for 3 weeks. Env var inherited by child is enough.
 
-                # Write lock file to signal bot session is active
-                lock_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), ".bot_active_session"
-                )
-                try:
-                    with open(lock_path, "w") as lf:
-                        lf.write(session_id or "active")
-                except Exception:
-                    pass
-
+                # Pass arg list (no shell=True). Windows resolves .cmd via Popen.
+                # stderr → STDOUT to avoid two-pipe deadlock when claude is verbose.
                 self._process = subprocess.Popen(
-                    cmd_str,
+                    cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     cwd=cwd,
-                    shell=True,
                     encoding="utf-8",
                     errors="replace",
                     env=env,
@@ -315,7 +301,7 @@ class StreamingCLI:
                     if not line:
                         break
                     if self._cancelled:
-                        self._process.terminate()
+                        self._kill_tree(self._process.pid)
                         if on_error:
                             on_error("⛔ בוטל.")
                         return
@@ -444,20 +430,31 @@ class StreamingCLI:
                         os.unlink(prompt_path)
                     except Exception:
                         pass
-                try:
-                    os.unlink(lock_path)
-                except Exception:
-                    pass
+                # lock-file cleanup removed 2026-06-10 — see Popen comment above
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
         return thread
 
     def cancel(self):
-        """Cancel the running process."""
+        """Cancel the running process — kills the full process tree, not just the shell."""
         self._cancelled = True
         if self._process:
+            self._kill_tree(self._process.pid)
+
+    @staticmethod
+    def _kill_tree(pid: int):
+        """Kill a process and all children. Without /T, killing cmd.exe leaves
+        the node/claude grandchild orphaned consuming tokens forever."""
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
             try:
-                self._process.terminate()
+                # Fallback: at least kill the direct child
+                import os as _os
+                _os.kill(pid, 9)
             except Exception:
                 pass

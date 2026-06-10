@@ -7,20 +7,56 @@ import re
 
 
 CSS = """
-body { font-family: -apple-system, Arial, sans-serif; padding: 16px; max-width: 900px;
-       margin: 0 auto; background: #1a1a2e; color: #e0e0e0; direction: rtl; }
-h1, h2, h3 { color: #64b5f6; border-bottom: 1px solid #333; padding-bottom: 4px; }
-table { border-collapse: collapse; width: 100%; margin: 12px 0; direction: ltr; }
-th, td { border: 1px solid #555; padding: 6px 10px; text-align: left; }
-th { background: #2a2a4a; color: #90caf9; }
-tr:nth-child(even) { background: #1e1e3a; }
-tr:nth-child(odd) { background: #16162e; }
-pre, code { background: #0d0d1a; padding: 2px 6px; border-radius: 3px; font-size: 13px;
-            direction: ltr; text-align: left; }
-pre { padding: 12px; overflow-x: auto; display: block; }
-.emoji { font-size: 1.1em; }
-blockquote { border-right: 3px solid #64b5f6; padding-right: 12px; color: #aaa; margin: 8px 0; }
-hr { border: none; border-top: 1px solid #444; margin: 16px 0; }
+@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;900&family=Inter:wght@300;400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+body { font-family: 'Heebo', 'Inter', Arial, sans-serif; padding: 24px; max-width: 960px;
+       margin: 0 auto; background: #0A0A0A; color: #F8F9FA; direction: rtl; line-height: 1.7;
+       font-size: 15px; }
+h1 { color: #FFB300; border-bottom: 2px solid rgba(255,179,0,0.30); padding-bottom: 10px;
+     font-weight: 900; font-size: 1.7em; margin-top: 28px; letter-spacing: -0.02em; }
+h2 { color: #FFB300; border-bottom: 1px solid #2C3E50; padding-bottom: 8px;
+     font-weight: 700; font-size: 1.3em; margin-top: 24px; }
+h3 { color: #F8F9FA; font-weight: 700; font-size: 1.1em; margin-top: 18px; }
+p { margin: 6px 0; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; direction: ltr; border-radius: 2px;
+        overflow: hidden; border: 1px solid #2C3E50; }
+th, td { border: 1px solid #2C3E50; padding: 10px 14px; text-align: left; font-size: 0.9em; }
+th { background: #1A1D24; color: #FFB300; font-weight: 700; text-transform: uppercase; font-size: 0.8em;
+     letter-spacing: 0.5px; }
+td { background: #111318; }
+tr:nth-child(even) td { background: #0A0A0A; }
+tr:hover td { background: rgba(255,179,0,0.05); }
+pre, code { font-family: 'IBM Plex Mono', 'Courier New', monospace; background: #111318;
+            padding: 2px 6px; border-radius: 2px; font-size: 13px; direction: ltr; text-align: left;
+            color: #63B3ED; border: 1px solid #2C3E50; }
+pre { padding: 16px; overflow-x: auto; display: block; margin: 10px 0; }
+blockquote { border-right: 3px solid #FFB300; padding-right: 16px; color: #8899AA; margin: 14px 0;
+             background: rgba(255,179,0,0.04); padding: 12px 16px; border-radius: 2px; }
+hr { border: none; border-top: 1px solid #2C3E50; margin: 24px 0; }
+a { color: #FFB300; text-decoration: none; }
+a:hover { color: #FFC940; text-decoration: underline; }
+b, strong { color: #F8F9FA; font-weight: 700; }
+.score-critical { color: #E53E3E; font-weight: 900; }
+.score-high { color: #FFB300; font-weight: 700; }
+.score-notable { color: #63B3ED; }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 2px; font-size: 0.75em;
+         font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+.badge-critical { background: rgba(229,62,62,0.10); color: #E53E3E; border: 1px solid rgba(229,62,62,0.20); }
+.badge-high { background: rgba(255,179,0,0.10); color: #FFB300; border: 1px solid rgba(255,179,0,0.30); }
+.badge-success { background: rgba(0,200,100,0.10); color: #00C864; border: 1px solid rgba(0,200,100,0.20); }
+.badge-info { background: rgba(99,179,237,0.10); color: #63B3ED; border: 1px solid rgba(99,179,237,0.20); }
+.header-bar { background: #111318; border: 1px solid #2C3E50; border-radius: 2px;
+              padding: 18px; margin-bottom: 24px; }
+.header-bar p { margin: 4px 0; }
+.footer { margin-top: 32px; padding-top: 18px; border-top: 1px solid #2C3E50;
+          color: #4A5568; font-size: 0.8em; text-align: center; }
+.ayit-logo { display: inline-block; color: #FFB300; font-weight: 900; font-size: 0.9em;
+             letter-spacing: 2px; text-transform: uppercase; }
+.section-he { direction: rtl; text-align: right; }
+.section-en { direction: ltr; text-align: left; font-family: 'Inter', 'IBM Plex Sans', Arial, sans-serif;
+              border-top: 2px solid #2C3E50; margin-top: 32px; padding-top: 24px; }
+.section-en h1 { border-bottom-color: #2C3E50; }
+.section-en table { direction: ltr; }
 """
 
 
@@ -97,7 +133,14 @@ def md_to_html(text: str) -> str:
             i += 1
             continue
         if line.startswith("# "):
-            html_parts.append(f'<h1>{_escape(line[2:])}</h1>')
+            heading_text = line[2:]
+            # Switch to LTR section when hitting English-only heading
+            if re.match(r'^Part B\b', heading_text, re.IGNORECASE):
+                html_parts.append('</div>')
+                html_parts.append('<div class="section-en" dir="ltr" style="direction:ltr; text-align:left;">')
+                html_parts.append(f'<h1>{_escape(heading_text)}</h1>')
+            else:
+                html_parts.append(f'<h1>{_escape(heading_text)}</h1>')
             i += 1
             continue
 
@@ -127,10 +170,18 @@ def md_to_html(text: str) -> str:
         i += 1
 
     body = "\n".join(html_parts)
+    has_part_b = '<div class="section-en"' in body
+    if has_part_b:
+        body = '<div class="section-he">' + body + '</div>'
+    else:
+        body = '<div class="section-he">' + body + '</div>'
     return (
         '<!DOCTYPE html>\n'
-        '<html lang="he">\n'
-        f'<head><meta charset="utf-8"><style>{CSS}</style></head>\n'
-        f'<body>{body}</body>\n'
-        '</html>'
+        '<html dir="rtl" lang="he">\n'
+        '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f'<title>Ayit Brief</title>\n'
+        f'<style>{CSS}</style></head>\n'
+        f'<body>{body}\n'
+        '<div class="footer"><span class="ayit-logo">AYIT</span> &mdash; Sovereign Hybrid Security Operating System</div>\n'
+        '</body>\n</html>'
     )

@@ -289,13 +289,14 @@ def _is_image(path: str) -> bool:
 
 def main():
     # Skip if this is a session launched by the Telegram bot
+    # (bot sets TELEGRAM_BOT_SESSION=1 on child env so its own claude sessions
+    # don't trigger duplicate notifications)
     if os.environ.get("TELEGRAM_BOT_SESSION"):
         sys.exit(0)
-
-    # Skip if the bot has an active CLI session (lock file exists)
-    lock_path = os.path.join(SCRIPT_DIR, ".bot_active_session")
-    if os.path.exists(lock_path):
-        sys.exit(0)
+    # NOTE: previously also checked a .bot_active_session lock file, but
+    # a stale lock (created on hard-kill before the bot could clean up)
+    # would silently suppress ALL notifications until manually removed.
+    # The env var above is sufficient. Lock-file logic removed 2026-06-10.
 
     # Read hook input from stdin
     try:

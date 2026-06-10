@@ -19,7 +19,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import TELEGRAM_TOKEN, CHAT_ID, TELEGRAM_MSG_LIMIT
+from config import TELEGRAM_TOKEN, CHAT_ID, TELEGRAM_MSG_LIMIT, ALLOWED_USERS
 from claude_agent import ClaudeAgent
 from ide_bridge import close_vscode_window, is_vscode_open, open_vscode
 from scheduler import TaskScheduler
@@ -34,6 +34,9 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     level=logging.INFO,
 )
+# Suppress noisy loggers that leak Telegram bot token in URL logs.
+for _noisy in ("httpx", "httpcore", "telegram.ext.Updater"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 # Enable DEBUG for streaming_cli to diagnose event flow
 logging.getLogger("streaming_cli").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -103,12 +106,24 @@ MESSAGE_BATCH_DELAY = 1.5  # seconds to wait for more messages before sending
 
 
 def authorized(update: Update) -> bool:
-    """Check that the message is from the authorized chat and not from the bot itself."""
+    """Check that the message is from the authorized chat AND user (if allowlist set)
+    and not from the bot itself."""
     if update.effective_chat.id != CHAT_ID:
         return False
     # Ignore messages from the bot itself (important in group chats)
     if update.effective_user and update.effective_user.is_bot:
         return False
+    # If ALLOWED_USERS is configured, enforce user-level allowlist.
+    # CRITICAL: the bot runs `claude --dangerously-skip-permissions`. Without this
+    # check, anyone added to the group gets arbitrary shell on the host machine.
+    if ALLOWED_USERS:
+        if not update.effective_user or update.effective_user.id not in ALLOWED_USERS:
+            logger.warning(
+                "Rejected unauthorized user_id=%s in chat=%s",
+                getattr(update.effective_user, "id", None),
+                update.effective_chat.id,
+            )
+            return False
     return True
 
 
@@ -434,6 +449,8 @@ async def cmd_ide(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_ide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard for /ide session selection."""
+    if not authorized(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -570,6 +587,8 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle model selection buttons."""
+    if not authorized(update):
+        return
     global current_model
     query = update.callback_query
     await query.answer()
@@ -1260,6 +1279,8 @@ async def _update_streaming_msg(msg, header: str, text: str,
 
 async def handle_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle create directory confirmation."""
+    if not authorized(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1291,6 +1312,8 @@ async def handle_create_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button press for project selection."""
+    if not authorized(update):
+        return
     query = update.callback_query
     await query.answer()
 

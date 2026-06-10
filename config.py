@@ -21,6 +21,10 @@ if os.path.exists(ENV_FILE):
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
 
+# Allowed Telegram user IDs (comma-separated in env). Empty set = chat-id-only auth (legacy, INSECURE).
+_allowed_raw = os.environ.get("ALLOWED_USERS", "").strip()
+ALLOWED_USERS = {int(x) for x in _allowed_raw.split(",") if x.strip().isdigit()} if _allowed_raw else set()
+
 # Limits
 TELEGRAM_MSG_LIMIT = 4096
 

@@ -1,9 +1,20 @@
 # Environment & secrets
 .env
+.env.*
 *.env.local
 .cli_history.json
 .sessions.json
 .bot_active_session
+.claude-session-pid
+
+# Internal ops files (DO NOT ship to public repo)
+*.bat
+*.vbs
+run_ops.py
+run_all_agents.py
+voice/
+ops_*.log
+preview-brief.html
 
 # Python
 __pycache__/
@@ -24,6 +35,7 @@ venv/
 # Runtime & debug
 .bot.pid
 .prompt_*.md
+*.log
 bot_debug.log
 *.jpg
 *.jpeg
