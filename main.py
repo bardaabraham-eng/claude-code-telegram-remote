@@ -607,6 +607,17 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
+    # /schedule was wired to the deprecated ClaudeAgent (Anthropic SDK direct).
+    # That path was removed when the bot migrated to Claude CLI streaming.
+    # Until someone reconnects it to StreamingCLI, fail loudly instead of
+    # crashing silently in task_callback hours later.
+    await update.message.reply_text(
+        "⚠️ /schedule זמנית לא זמין — הקוד הישן הוסר במעבר ל-Claude CLI.\n"
+        "אם אתה צריך תזמון, השתמש ב-Windows Task Scheduler או שלח לי משימה לתיקון הנתיב הזה."
+    )
+    return
+
+    # Original code below kept for future reference (currently unreachable):
     text = update.message.text
     match = re.match(r"/schedule\s+(\d{1,2}):(\d{2})\s+(.+)", text)
     if not match:
