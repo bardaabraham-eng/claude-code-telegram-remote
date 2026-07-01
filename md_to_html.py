@@ -182,6 +182,6 @@ def md_to_html(text: str) -> str:
         f'<title>Ayit Brief</title>\n'
         f'<style>{CSS}</style></head>\n'
         f'<body>{body}\n'
-        '<div class="footer"><span class="ayit-logo">AYIT</span> &mdash; Sovereign Hybrid Security Operating System</div>\n'
+        '<div class="footer"><span class="ayit-logo">AYIT</span> &mdash; פלטפורמת עילית לניהול סייבר</div>\n'
         '</body>\n</html>'
     )
