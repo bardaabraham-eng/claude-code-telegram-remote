@@ -280,6 +280,8 @@ class StreamingCLI:
 
                 # Pass arg list (no shell=True). Windows resolves .cmd via Popen.
                 # stderr → STDOUT to avoid two-pipe deadlock when claude is verbose.
+                # CREATE_NO_WINDOW so Claude Code CLI runs headless (no console flash).
+                _cnw = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 self._process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -288,6 +290,7 @@ class StreamingCLI:
                     encoding="utf-8",
                     errors="replace",
                     env=env,
+                    creationflags=_cnw,
                 )
 
                 full_text = ""
