@@ -296,14 +296,32 @@ def main():
     # NOTE: previously also checked a .bot_active_session lock file, but
     # a stale lock (created on hard-kill before the bot could clean up)
     # would silently suppress ALL notifications until manually removed.
-    # The env var above is sufficient. Lock-file logic removed 2026-06-10.
-
-    # Read hook input from stdin
+    # The env var above is sufficient for the DEV bot's own child sessions.
+    #
+    # BUT: this hook is registered in ~/.claude/settings.json globally, so it
+    # fires for EVERY Claude Code session on this machine — including the OPS
+    # bot's agents (Natasha, FRIDAY, etc). Env vars do not propagate to hooks
+    # reliably in stream-json mode, so TELEGRAM_BOT_SESSION alone is not enough.
+    # Live incident 2026-07-08: Natasha's scheduled morning run fired 4 Task
+    # subagents, each triggered Stop hook which spent 550-600ms trying to reach
+    # a stale Telegram endpoint, contributing to the run timing out with exit
+    # code 1 and zero brief output.
+    #
+    # Belt-and-suspenders check: exit 0 unless the session's cwd sits under
+    # the telegram_agent (DEV bot) tree. We read the transcript_path from the
+    # hook stdin because that reliably reflects where the session actually
+    # runs, unlike os.getcwd() which reflects the hook's own working directory.
     try:
         raw = sys.stdin.read()
         hook_data = json.loads(raw) if raw.strip() else {}
     except Exception:
         hook_data = {}
+
+    session_cwd = hook_data.get("cwd", "")
+    if session_cwd and "telegram_agent" not in session_cwd.replace("\\", "/").lower():
+        # Session is not under telegram_agent — this notification belongs to a
+        # different project (OPS agents, our own bot dev, etc). Silent exit.
+        sys.exit(0)
 
     # Don't send notification if this Stop was triggered by another Stop hook
     if hook_data.get("stop_hook_active"):
